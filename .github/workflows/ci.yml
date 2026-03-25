@@ -1,0 +1,225 @@
+name: Orchestrator CI/CD Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  # ── Code Formatting ──────────────────────────────────────────
+  format:
+    name: Code Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Check formatting (Black)
+        run: black --check --diff app/ tests/
+
+      - name: Check import sorting (isort)
+        run: isort --check-only --diff app/ tests/
+
+  # ── Linting ──────────────────────────────────────────────────
+  lint:
+    name: Lint & Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run flake8
+        run: flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
+
+      - name: Run pylint
+        run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903 || true
+
+  # ── Unit Tests ───────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        env:
+          ALLOW_DB_FAILURE: "true"
+          USE_MOCK_DATA: "true"
+          MYSQL_HOST: "localhost"
+          MYSQL_DATABASE: "test_db"
+          MYSQL_USER: "test_user"
+          MYSQL_PASSWORD: "test_pass"
+        run: pytest tests/unit/ -v --tb=short --junitxml=junit-report.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: junit-report.xml
+          retention-days: 7
+
+  # ── Type Checking ────────────────────────────────────────────
+  type-check:
+    name: Type Checking
+    needs: [format, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run mypy
+        run: mypy app/ --ignore-missing-imports --no-strict-optional || true
+
+  # ── Integration Tests + Coverage ─────────────────────────────
+  integration-tests:
+    name: Integration Tests with Coverage
+    needs: [format, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        env:
+          ALLOW_DB_FAILURE: "true"
+          USE_MOCK_DATA: "true"
+          MYSQL_HOST: "localhost"
+          MYSQL_DATABASE: "test_db"
+          MYSQL_USER: "test_user"
+          MYSQL_PASSWORD: "test_pass"
+        run: pytest tests/ --cov=app --cov-report=html --cov-report=xml -v
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 7
+
+  # ── Security Scan ────────────────────────────────────────────
+  security-audit:
+    name: Security Scan
+    needs: [format, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run Bandit
+        run: |
+          bandit -r app/ -f json -o bandit-report.json || true
+          bandit -r app/ || true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: bandit-report.json
+          retention-days: 7
+
+  # ── Docker Build ─────────────────────────────────────────────
+  build-docker:
+    name: Build Docker Image
+    needs: [unit-tests, type-check, integration-tests, security-audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ouroboros-orchestrator:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Summary ──────────────────────────────────────────────────
+  summary:
+    name: CI/CD Summary
+    needs: [unit-tests, format, lint, type-check, integration-tests, security-audit, build-docker]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# Orchestrator CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Format | ${{ needs.format.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit Tests | ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Type Check | ${{ needs.type-check.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Integration Tests | ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Audit | ${{ needs.security-audit.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build | ${{ needs.build-docker.result }} |" >> $GITHUB_STEP_SUMMARY

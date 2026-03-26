@@ -108,7 +108,7 @@ jobs:
 
   # -- Type Checking ---------------------------------------------------
   type-check:
-    name: Type Checking (mypy)
+    name: Type Checking
     needs: [format, lint]
     runs-on: ubuntu-latest
     steps:

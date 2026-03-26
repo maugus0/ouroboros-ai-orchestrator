@@ -2,8 +2,7 @@
 
 import os
 
-from pydantic import ConfigDict
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_VERSION = "0.1.0"
 
@@ -58,7 +57,7 @@ class Settings(BaseSettings):
     SEED_DATABASE: bool = True
     DOCKER_MYSQL_PORT: int = 3307
 
-    model_config = ConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
     def get_db_host(self) -> str:
         return os.getenv("MYSQL_HOST", self.DB_HOST)

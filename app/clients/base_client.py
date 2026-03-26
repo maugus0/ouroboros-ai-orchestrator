@@ -49,10 +49,10 @@ class BaseAgentClient:
                 return resp.json()
         except httpx.HTTPStatusError as exc:
             logger.error("agent_http_error", agent=self.agent_name, url=url, status=exc.response.status_code)
-            raise AgentCallError(self.agent_name, f"HTTP {exc.response.status_code}")
+            raise AgentCallError(self.agent_name, f"HTTP {exc.response.status_code}") from exc
         except httpx.RequestError as exc:
             logger.error("agent_request_error", agent=self.agent_name, url=url, error=str(exc))
-            raise AgentCallError(self.agent_name, str(exc))
+            raise AgentCallError(self.agent_name, str(exc)) from exc
 
     @retry(
         stop=stop_after_attempt(3),
@@ -68,7 +68,7 @@ class BaseAgentClient:
                 return resp.json()
         except httpx.HTTPStatusError as exc:
             logger.error("agent_http_error", agent=self.agent_name, url=url, status=exc.response.status_code)
-            raise AgentCallError(self.agent_name, f"HTTP {exc.response.status_code}")
+            raise AgentCallError(self.agent_name, f"HTTP {exc.response.status_code}") from exc
         except httpx.RequestError as exc:
             logger.error("agent_request_error", agent=self.agent_name, url=url, error=str(exc))
-            raise AgentCallError(self.agent_name, str(exc))
+            raise AgentCallError(self.agent_name, str(exc)) from exc

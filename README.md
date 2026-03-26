@@ -403,6 +403,7 @@ isort app/ tests/
 
 # Lint
 flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
+pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903
 
 # Type check
 mypy app/ --ignore-missing-imports --no-strict-optional
@@ -418,7 +419,7 @@ chmod +x pre-commit-check.sh
 ./pre-commit-check.sh
 ```
 
-Runs Black, isort, flake8, syntax validation, tests, and mypy in sequence.
+Runs Black, isort, flake8, syntax validation, tests, pylint, and mypy in sequence (all must pass).
 
 ---
 
@@ -465,9 +466,9 @@ tests/
 | Stage | Description |
 |-------|-------------|
 | **Format** | Black + isort validation |
-| **Lint** | flake8 + pylint code quality checks |
+| **Lint** | **flake8** + **pylint** (both blocking; same disables as local: `C0111`, `R0903`) |
 | **Unit Tests** | pytest with JUnit XML output |
-| **Type Check** | mypy static type analysis (after format + lint) |
+| **Type Check** | **mypy** static analysis — blocking (after format + lint) |
 | **Integration Tests** | pytest with coverage HTML + XML (after format + lint) |
 | **Security Audit** | Bandit static security analysis (after format + lint) |
 | **Docker Build** | Verify image builds — no push (after all above) |
@@ -492,7 +493,8 @@ unit-tests (independent) ──────> build-docker
 black --check app/ tests/
 isort --check-only app/ tests/
 flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
-mypy app/ --ignore-missing-imports --no-strict-optional || true
+pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903
+mypy app/ --ignore-missing-imports --no-strict-optional
 ALLOW_DB_FAILURE=true pytest tests/ -v
 bandit -r app/ || true
 docker build -t ouroboros-orchestrator .

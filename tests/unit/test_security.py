@@ -1,5 +1,8 @@
 """Tests for JWT token creation and validation."""
 
+# Pytest injects fixtures by parameter name; names match the fixture definition.
+# pylint: disable=redefined-outer-name
+
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -8,7 +11,7 @@ from app.core.security import create_access_token, create_refresh_token, decode_
 
 
 @pytest.fixture(scope="module")
-def rsa_keys():
+def rsa_key_pair():
     """Generate a temporary RSA key pair for testing."""
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_pem = private_key.private_bytes(
@@ -31,8 +34,8 @@ ISSUER = "test-issuer"
 AUDIENCE = "test-audience"
 
 
-def test_create_and_decode_access_token(rsa_keys):
-    private_pem, public_pem = rsa_keys
+def test_create_and_decode_access_token(rsa_key_pair):
+    private_pem, public_pem = rsa_key_pair
     token = create_access_token(
         payload={"sub": "user-123", "email": "test@example.com"},
         private_key=private_pem,
@@ -44,8 +47,8 @@ def test_create_and_decode_access_token(rsa_keys):
     assert claims["type"] == "access"
 
 
-def test_create_and_decode_refresh_token(rsa_keys):
-    private_pem, public_pem = rsa_keys
+def test_create_and_decode_refresh_token(rsa_key_pair):
+    private_pem, public_pem = rsa_key_pair
     token = create_refresh_token(
         payload={"sub": "user-456"},
         private_key=private_pem,
@@ -57,7 +60,7 @@ def test_create_and_decode_refresh_token(rsa_keys):
     assert claims["type"] == "refresh"
 
 
-def test_decode_invalid_token(rsa_keys):
-    _, public_pem = rsa_keys
+def test_decode_invalid_token(rsa_key_pair):
+    _, public_pem = rsa_key_pair
     with pytest.raises(Exception):
         decode_token("not.a.token", public_key=public_pem, issuer=ISSUER, audience=AUDIENCE)

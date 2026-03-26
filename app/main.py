@@ -9,7 +9,7 @@ from fastapi.openapi.utils import get_openapi
 
 from app.api import auth, chats, dashboard, health, profiles, workflows
 from app.config import APP_VERSION, settings
-from app.core.database import close_pool, create_pool
+from app.core.database import PoolConfig, close_pool, create_pool
 from app.core.logging import get_logger, setup_logging
 from app.middleware.logging_middleware import LoggingMiddleware
 
@@ -17,7 +17,7 @@ load_dotenv()
 
 
 @asynccontextmanager
-async def lifespan(application: FastAPI):
+async def lifespan(_application: FastAPI):
     """Application startup and shutdown lifecycle."""
     setup_logging(log_level=settings.LOG_LEVEL)
     logger = get_logger("startup")
@@ -27,12 +27,14 @@ async def lifespan(application: FastAPI):
     if not settings.ALLOW_DB_FAILURE:
         try:
             await create_pool(
-                host=settings.get_db_host(),
-                port=settings.get_db_port(),
-                db=settings.get_db_name(),
-                user=settings.get_db_user(),
-                password=settings.get_db_password(),
-                pool_size=settings.DB_POOL_SIZE,
+                PoolConfig(
+                    host=settings.get_db_host(),
+                    port=settings.get_db_port(),
+                    db=settings.get_db_name(),
+                    user=settings.get_db_user(),
+                    password=settings.get_db_password(),
+                    pool_size=settings.DB_POOL_SIZE,
+                )
             )
         except Exception as exc:
             logger.error("database_connection_failed", error=str(exc))
@@ -97,7 +99,7 @@ def custom_openapi():
     return schema
 
 
-app.openapi = custom_openapi
+app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
 if __name__ == "__main__":

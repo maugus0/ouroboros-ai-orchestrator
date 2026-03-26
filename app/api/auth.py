@@ -27,7 +27,7 @@ async def refresh_token():
 
 
 @router.post("/logout")
-async def logout(claims: dict = Depends(get_current_user)):
+async def logout(_claims: dict = Depends(get_current_user)):
     """Invalidate the current session. (Implementation pending)"""
     return StandardResponse(message="Logout endpoint — not yet implemented")
 

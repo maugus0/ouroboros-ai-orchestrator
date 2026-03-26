@@ -1,6 +1,5 @@
 """Data-access layer for the users table (raw SQL, aiomysql)."""
 
-from app.core.database import get_pool
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)

@@ -1,4 +1,4 @@
-name: Orchestrator CI/CD Pipeline
+name: OuroborosAI Orchestrator CI/CD Pipeline
 
 on:
   pull_request:
@@ -6,17 +6,25 @@ on:
       - main
       - develop
 
+# Older action bundles shipped with Node 20; newer majors run on Node 24.
+# See: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  # ── Code Formatting ──────────────────────────────────────────
+  # -- Code Formatting -------------------------------------------------
   format:
     name: Code Formatting
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -31,16 +39,16 @@ jobs:
       - name: Check import sorting (isort)
         run: isort --check-only --diff app/ tests/
 
-  # ── Linting ──────────────────────────────────────────────────
+  # -- Linting ---------------------------------------------------------
   lint:
     name: Lint & Code Quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -55,16 +63,16 @@ jobs:
       - name: Run pylint
         run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903 || true
 
-  # ── Unit Tests ───────────────────────────────────────────────
+  # -- Unit Tests ------------------------------------------------------
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -85,23 +93,23 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: junit-report.xml
           retention-days: 7
 
-  # ── Type Checking ────────────────────────────────────────────
+  # -- Type Checking ---------------------------------------------------
   type-check:
     name: Type Checking
     needs: [format, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -113,17 +121,17 @@ jobs:
       - name: Run mypy
         run: mypy app/ --ignore-missing-imports --no-strict-optional || true
 
-  # ── Integration Tests + Coverage ─────────────────────────────
+  # -- Integration Tests + Coverage ------------------------------------
   integration-tests:
     name: Integration Tests with Coverage
     needs: [format, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -144,23 +152,23 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: htmlcov/
           retention-days: 7
 
-  # ── Security Scan ────────────────────────────────────────────
+  # -- Security Scan ---------------------------------------------------
   security-audit:
     name: Security Scan
     needs: [format, lint]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -176,26 +184,26 @@ jobs:
 
       - name: Upload security reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: security-reports
           path: bandit-report.json
           retention-days: 7
 
-  # ── Docker Build ─────────────────────────────────────────────
+  # -- Docker Build ----------------------------------------------------
   build-docker:
     name: Build Docker Image
     needs: [unit-tests, type-check, integration-tests, security-audit]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -203,7 +211,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Summary ──────────────────────────────────────────────────
+  # -- Summary ---------------------------------------------------------
   summary:
     name: CI/CD Summary
     needs: [unit-tests, format, lint, type-check, integration-tests, security-audit, build-docker]
@@ -212,14 +220,14 @@ jobs:
     steps:
       - name: Generate Summary
         run: |
-          echo "# Orchestrator CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# OuroborosAI Orchestrator CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Format | ${{ needs.format.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Unit Tests | ${{ needs.unit-tests.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Type Check | ${{ needs.type-check.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Integration Tests | ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Security Audit | ${{ needs.security-audit.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Docker Build | ${{ needs.build-docker.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Format | ${{ needs.format.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ needs.lint.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Type Check | ${{ needs.type-check.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Integration Tests | ${{ needs.integration-tests.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Audit | ${{ needs.security-audit.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build | ${{ needs.build-docker.result == 'success' && 'Passed' || 'Failed' }} |" >> $GITHUB_STEP_SUMMARY

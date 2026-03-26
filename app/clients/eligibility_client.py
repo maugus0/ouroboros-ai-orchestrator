@@ -1,5 +1,7 @@
 """HTTP client for the Eligibility Engine agent service."""
 
+from typing import Any
+
 from app.clients.base_client import BaseAgentClient
 from app.config import settings
 
@@ -9,10 +11,9 @@ class EligibilityClient(BaseAgentClient):
     agent_name = "eligibility_engine"
 
     async def check_eligibility(
-        self, user_id: str, profile: dict, programs: list, scholarships: list, trace_id: str | None = None
+        self,
+        evaluation: dict[str, Any],
+        trace_id: str | None = None,
     ) -> dict:
-        return await self._post(
-            "/evaluate",
-            {"user_id": user_id, "profile": profile, "programs": programs, "scholarships": scholarships},
-            trace_id=trace_id,
-        )
+        """POST /evaluate with keys: user_id, profile, programs, scholarships."""
+        return await self._post("/evaluate", evaluation, trace_id=trace_id)

@@ -70,15 +70,15 @@ def decode_token(
             issuer=issuer,
             audience=audience,
         )
-    except jwt.ExpiredSignatureError:
+    except jwt.ExpiredSignatureError as exc:
         logger.warning("token_expired")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
-    except jwt.InvalidIssuerError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired") from exc
+    except jwt.InvalidIssuerError as exc:
         logger.warning("invalid_issuer")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token issuer")
-    except jwt.InvalidAudienceError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token issuer") from exc
+    except jwt.InvalidAudienceError as exc:
         logger.warning("invalid_audience")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token audience")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token audience") from exc
     except jwt.PyJWTError as exc:
         logger.error("jwt_decode_error", error=str(exc))
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc

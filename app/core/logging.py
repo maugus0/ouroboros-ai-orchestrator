@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from typing import Any, cast
 
 import structlog
 
@@ -35,7 +36,7 @@ def setup_logging(log_level: str = "INFO", environment: str = "development") -> 
         processors.append(structlog.dev.ConsoleRenderer())
 
     structlog.configure(
-        processors=processors,
+        processors=cast(Any, processors),
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),

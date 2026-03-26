@@ -84,11 +84,21 @@ else
 fi
 
 echo ""
-echo "6. Running type checking (mypy)..."
+echo "6. Running pylint..."
+if pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903 > /dev/null 2>&1; then
+    success "Pylint passed"
+else
+    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903"
+    exit 1
+fi
+
+echo ""
+echo "7. Running type checking (mypy)..."
 if mypy app/ --ignore-missing-imports --no-strict-optional > /dev/null 2>&1; then
     success "Type checking passed"
 else
-    warning "Type checking completed with warnings"
+    error "Type checking failed. Run: mypy app/ --ignore-missing-imports --no-strict-optional"
+    exit 1
 fi
 
 echo ""

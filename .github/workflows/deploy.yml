@@ -357,7 +357,7 @@ jobs:
           path: trivy-results.json
 
   # ---------------------------------------------------------------------------
-  # Stage 5: Summary (does not gate on Trivy; Trivy only on main push)
+  # Stage 5: Summary (runs after all jobs including Trivy; if: always so PRs still get a summary when Trivy is skipped)
   # ---------------------------------------------------------------------------
   reports-summary:
     name: CI Summary & Report Bundle
@@ -370,6 +370,7 @@ jobs:
       - security-static
       - security-scan
       - docker-build
+      - trivy-scan
     if: always()
     permissions:
       contents: read
@@ -391,8 +392,9 @@ jobs:
             echo "- Bandit: ${{ needs.security-static.result }}";
             echo "- Snyk OSS: ${{ needs.security-scan.result }}";
             echo "- Docker Build/Push: ${{ needs.docker-build.result }}";
+            echo "- Trivy (container scan): ${{ needs.trivy-scan.result }}";
             echo "";
-            echo "_Trivy image scan runs after each successful image push to GHCR from main._";
+            echo "_Trivy runs on push to main only; on PRs the Trivy job is skipped._";
           } > summary.md
 
       - name: Upload consolidated report bundle

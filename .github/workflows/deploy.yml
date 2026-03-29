@@ -1,7 +1,16 @@
 # OuroborosAI Orchestrator — CI/CD
 #
-# Stages: lint-quality + unit-tests (parallel) → type-check, integration-tests,
-#         security (Bandit + Snyk) → Docker GHCR (push image on merge to main) → Trivy (main).
+# Triggers:
+#   - pull_request (main, develop): full CI except Trivy and GHCR push (image is built with `load:` only).
+#   - push (main only): same CI + push image to GHCR + Trivy scan on the pushed image.
+#
+# Stage overview (dependency order):
+#   1. format-check, lint-check, unit-tests — parallel; separate format vs lint for clearer failure signals in the UI.
+#   2. type-check, integration-tests, security-static, security-scan — parallel; each needs (1) to pass.
+#   3. docker-build — needs (2); builds always; pushes to ghcr.io only on push to main (see inline comments).
+#   4. trivy-scan — push-to-main only; scans the image tag that was just pushed.
+#   5. reports-summary — needs all above; uses `if: always()` so it still runs when trivy-scan is skipped on PRs
+#      (GitHub runs this job because its `if` is satisfied; skipped needs entries appear as result `skipped` in the summary).
 #
 # Action major tags (verified on GitHub):
 #   actions/checkout@v6 — https://github.com/actions/checkout/releases
@@ -16,9 +25,11 @@
 name: OuroborosAI Orchestrator CI/CD Pipeline
 
 on:
+  # PRs: validate changes before merge (no registry push, no Trivy on remote image).
   pull_request:
     branches: [main, develop]
     types: [opened, synchronize, reopened]
+  # After merge to main: publish image and run container CVE scan against GHCR.
   push:
     branches: [main]
 
@@ -35,15 +46,14 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Stage 1: Lint & unit tests (parallel)
+  # Stage 1: Format, lint, unit tests (parallel)
+  # Split format vs lint so GitHub shows which category failed (debuggability).
   # ---------------------------------------------------------------------------
-  lint-quality:
-    name: Lint & Formatting
+  format-check:
+    name: Code Formatting (Black & isort)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write
-      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -65,6 +75,27 @@ jobs:
 
       - name: Check import sorting (isort)
         run: isort --check-only --diff app/ tests/
+
+  lint-check:
+    name: Code Lint (flake8 & pylint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
 
       - name: Lint (flake8)
         run: flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
@@ -115,7 +146,7 @@ jobs:
   type-check:
     name: Type Checking (mypy)
     runs-on: ubuntu-latest
-    needs: [lint-quality, unit-tests]
+    needs: [format-check, lint-check, unit-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -138,7 +169,7 @@ jobs:
   integration-tests:
     name: Tests with Coverage
     runs-on: ubuntu-latest
-    needs: [lint-quality, unit-tests]
+    needs: [format-check, lint-check, unit-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -184,7 +215,7 @@ jobs:
   security-static:
     name: Security Scan (Bandit)
     runs-on: ubuntu-latest
-    needs: [lint-quality, unit-tests]
+    needs: [format-check, lint-check, unit-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -215,9 +246,10 @@ jobs:
   security-scan:
     name: Security Scan (Snyk OSS)
     runs-on: ubuntu-latest
-    needs: [lint-quality, unit-tests]
+    needs: [format-check, lint-check, unit-tests]
     env:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    # Required when uploading SARIF to GitHub Code Scanning (upload-sarif step).
     permissions:
       contents: read
       security-events: write
@@ -226,10 +258,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # No secret: job still succeeds; documents that dependency scanning is optional until SNYK_TOKEN is set.
       - name: Skip Snyk (no token)
         if: env.SNYK_TOKEN == ''
         run: echo "SNYK_TOKEN not set; skipping Snyk OSS scan. Add repo secret to enforce dependency checks."
 
+      # Only when SNYK_TOKEN is present — runs snyk test and may produce snyk.sarif.
       - name: Setup Snyk CLI
         if: env.SNYK_TOKEN != ''
         uses: snyk/actions/setup@v1.0.0
@@ -243,6 +277,7 @@ jobs:
             --severity-threshold=high \
             --sarif-file-output=snyk.sarif
 
+      # Upload to Code Scanning only when enabled, token exists, SARIF exists, and (on PRs) from same repo (no fork SARIF upload).
       - name: Upload Snyk SARIF to Code Scanning
         if: vars.ENABLE_CODE_SCANNING_SARIF == 'true' && env.SNYK_TOKEN != '' && always() && hashFiles('snyk.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@v4
@@ -257,7 +292,7 @@ jobs:
           path: snyk.sarif
 
   # ---------------------------------------------------------------------------
-  # Stage 3: Docker build → GHCR (push image only when merging to main, not on PR)
+  # Stage 3: Docker — PRs: build + load locally only. Main push: also login + push to GHCR.
   # ---------------------------------------------------------------------------
   docker-build:
     name: Build & Push Docker Image
@@ -277,6 +312,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # Registry write is only for publishing after merge to main (not on PR builds).
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -297,6 +333,8 @@ jobs:
             type=raw,value=${{ github.sha }}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # push: true only on main branch push — publishes image for Trivy and deploys.
+      # load: true on PR — validates Dockerfile without publishing.
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
@@ -309,7 +347,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------
-  # Stage 4: Trivy (after image push to GHCR on main)
+  # Stage 4: Trivy — only after a real push to main (image must exist in GHCR at :sha).
+  # Skipped on pull_request; see reports-summary for why downstream summary still runs.
   # ---------------------------------------------------------------------------
   trivy-scan:
     name: Trivy Scan
@@ -357,13 +396,17 @@ jobs:
           path: trivy-results.json
 
   # ---------------------------------------------------------------------------
-  # Stage 5: Summary (runs after all jobs including Trivy; if: always so PRs still get a summary when Trivy is skipped)
+  # Stage 5: Summary artifact for all jobs.
+  # `if: always()` lets this job run when trivy-scan is skipped (PRs). Skipped needs show as
+  # `skipped` in the needs context — they do not block this job. (Without `if: always()`, a skipped
+  # needed job would skip dependents; see GitHub docs: jobs.<job_id>.needs + conditional if.)
   # ---------------------------------------------------------------------------
   reports-summary:
     name: CI Summary & Report Bundle
     runs-on: ubuntu-latest
     needs:
-      - lint-quality
+      - format-check
+      - lint-check
       - unit-tests
       - type-check
       - integration-tests
@@ -385,7 +428,8 @@ jobs:
             echo "- Container image: ghcr.io/${{ github.repository }}";
             echo "";
             echo "## Job results";
-            echo "- Lint & Formatting: ${{ needs.lint-quality.result }}";
+            echo "- Formatting (Black/isort): ${{ needs.format-check.result }}";
+            echo "- Lint (flake8/pylint): ${{ needs.lint-check.result }}";
             echo "- Unit Tests: ${{ needs.unit-tests.result }}";
             echo "- Type Check (mypy): ${{ needs.type-check.result }}";
             echo "- Tests + Coverage: ${{ needs.integration-tests.result }}";
@@ -394,7 +438,7 @@ jobs:
             echo "- Docker Build/Push: ${{ needs.docker-build.result }}";
             echo "- Trivy (container scan): ${{ needs.trivy-scan.result }}";
             echo "";
-            echo "_Trivy runs on push to main only; on PRs the Trivy job is skipped._";
+            echo "_Trivy runs on push to main only; on PRs the Trivy job is skipped (result: skipped)._";
           } > summary.md
 
       - name: Upload consolidated report bundle

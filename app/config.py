@@ -23,7 +23,12 @@ class Settings(BaseSettings):
     DB_CONNECTION_TIMEOUT: int = 20
     DB_POOL_LOG_CONNECTIONS: bool = False
 
-    # ========== JWT (RS256 - Self-rolled) ==========
+    # ========== Auth0 Configuration ==========
+    AUTH0_DOMAIN: str = ""  # e.g., "ouroboros-dev.us.auth0.com"
+    AUTH0_API_AUDIENCE: str = ""  # e.g., "https://api.ouroboros.ai"
+    AUTH0_ALGORITHMS: str = "RS256"  # Comma-separated if multiple
+
+    # ========== JWT (RS256 - Legacy, kept for backward compatibility) ==========
     JWT_PRIVATE_KEY: str = ""
     JWT_PUBLIC_KEY: str = ""
     JWT_ACCESS_TOKEN_EXP_SECONDS: int = 3600
@@ -77,6 +82,20 @@ class Settings(BaseSettings):
 
     def get_cors_origins_list(self) -> list:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    @property
+    def auth0_issuer(self) -> str:
+        """Auth0 issuer URL (derived from domain)."""
+        return f"https://{self.AUTH0_DOMAIN}/"
+
+    @property
+    def auth0_jwks_uri(self) -> str:
+        """Auth0 JWKS endpoint for public key retrieval."""
+        return f"https://{self.AUTH0_DOMAIN}/.well-known/jwks.json"
+
+    def get_auth0_algorithms(self) -> list[str]:
+        """Parse AUTH0_ALGORITHMS as a list."""
+        return [alg.strip() for alg in self.AUTH0_ALGORITHMS.split(",")]
 
 
 settings = Settings()

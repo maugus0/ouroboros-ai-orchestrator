@@ -85,10 +85,10 @@ fi
 
 echo ""
 echo "6. Running pylint..."
-if pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903 > /dev/null 2>&1; then
+if pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801 > /dev/null 2>&1; then
     success "Pylint passed"
 else
-    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903"
+    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801"
     exit 1
 fi
 

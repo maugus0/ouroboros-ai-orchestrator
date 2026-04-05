@@ -28,7 +28,7 @@ Central coordination service for the **Ouroboros AI** scholarship discovery plat
 
 The Orchestrator Service is the **central nervous system** of the Ouroboros AI platform:
 
-1. **Authenticates users** via self-rolled JWT RS256 (Orchestrator owns the private key)
+1. **Authenticates users** via Auth0 (JWT validation with JWKS)
 2. **Manages chat sessions** and message history
 3. **Drives a sequential workflow** state machine: Profile → Programs → Scholarships → Eligibility → Application Support
 4. **Delegates to 5 agent microservices** via HTTP (httpx + tenacity retry)
@@ -113,16 +113,17 @@ INITIATED → PROFILE_PARSING → PROFILE_COMPLETE
 
 | Concern | Approach |
 |---------|----------|
-| User → Orchestrator | JWT RS256 (self-rolled, Orchestrator owns private key) |
+| User → Orchestrator | **Auth0** JWT RS256 (validated via JWKS) |
 | Orchestrator → Agent | `X-Service-Token` shared secret header |
-| Password storage | bcrypt via `passlib` |
-| Token types | Access (1 hour) + Refresh (30 days) |
+| Password storage | **Auth0** (passwords never stored locally) |
+| Token types | Auth0 Access Token + Refresh Token |
+| User provisioning | **JIT** (Just-In-Time) — users created on first login |
 
 ---
 
 ## Features
 
-- **Self-rolled JWT RS256** authentication with access + refresh tokens
+- **Auth0 integration** with JWT validation via JWKS and JIT user provisioning
 - **Sequential workflow** state machine with retry-from-last-success on failure
 - **5 agent HTTP clients** with exponential backoff retry (tenacity)
 - **Structured logging** via structlog with JSON output in production
@@ -140,7 +141,7 @@ INITIATED → PROFILE_PARSING → PROFILE_COMPLETE
 |------|---------|---------|
 | Python | 3.11+ | Runtime |
 | MySQL | 8.0+ | Database |
-| OpenSSL | any | JWT RS256 key generation |
+| Auth0 account | — | Authentication provider |
 | Docker | 24.0+ | Containerised deployment (optional) |
 
 ---
@@ -158,12 +159,26 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements-dev.txt
 ```
 
-### 2. Generate JWT Keys
+### 2. Set Up Auth0
 
-```bash
-openssl genrsa -out jwt_private.pem 2048
-openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
-```
+1. **Create an Auth0 tenant** at [auth0.com](https://auth0.com)
+
+2. **Create an API** in Auth0 Dashboard:
+   - Go to **Applications → APIs → Create API**
+   - Name: `Ouroboros API`
+   - Identifier (Audience): `https://api.ouroboros.ai` (or your custom identifier)
+   - Signing Algorithm: `RS256`
+
+3. **Create an Application** (for your frontend):
+   - Go to **Applications → Applications → Create Application**
+   - Type: **Single Page Application** (for React frontend)
+   - Configure **Allowed Callback URLs**: `http://localhost:3000/callback`
+   - Configure **Allowed Logout URLs**: `http://localhost:3000`
+   - Configure **Allowed Web Origins**: `http://localhost:3000`
+
+4. **Note your credentials**:
+   - Auth0 Domain (e.g., `your-tenant.us.auth0.com`)
+   - API Audience (e.g., `https://api.ouroboros.ai`)
 
 ### 3. Configure Environment
 
@@ -174,13 +189,15 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```bash
+# Database
 DB_HOST=localhost
 DB_NAME=ouroboros_orchestrator_db
 DB_USERNAME=root
 DB_PASSWORD=your_mysql_password
 
-JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+# Auth0 (required)
+AUTH0_DOMAIN=your-tenant.us.auth0.com
+AUTH0_API_AUDIENCE=https://api.ouroboros.ai
 ```
 
 See [Configuration](#configuration) for the full reference.
@@ -259,13 +276,17 @@ Swagger docs are available at `http://localhost:8000/docs`.
 | `DB_POOL_SIZE` | No | `10` | Max connections in pool |
 | `DB_POOL_NAME` | No | `orchestrator_pool` | Connection pool name |
 | `DB_CONNECTION_TIMEOUT` | No | `20` | Connection timeout (seconds) |
-| **JWT Authentication** ||||
-| `JWT_PRIVATE_KEY` | Yes | — | RSA private key (PEM, for issuing tokens) |
-| `JWT_PUBLIC_KEY` | Yes | — | RSA public key (PEM, for validating tokens) |
-| `JWT_ACCESS_TOKEN_EXP_SECONDS` | No | `3600` | Access token TTL (1 hour) |
-| `JWT_REFRESH_TOKEN_EXP_SECONDS` | No | `2592000` | Refresh token TTL (30 days) |
-| `JWT_ISSUER` | No | `ouroboros.ai/auth` | Token issuer claim |
-| `JWT_AUDIENCE` | No | `ouroboros-api` | Token audience claim |
+| **Auth0 Configuration** ||||
+| `AUTH0_DOMAIN` | Yes | — | Auth0 tenant domain (e.g., `your-tenant.us.auth0.com`) |
+| `AUTH0_API_AUDIENCE` | Yes | — | Auth0 API identifier (e.g., `https://api.ouroboros.ai`) |
+| `AUTH0_ALGORITHMS` | No | `RS256` | JWT signing algorithms (comma-separated) |
+| **JWT Authentication (Legacy)** ||||
+| `JWT_PRIVATE_KEY` | No | — | RSA private key (deprecated, use Auth0) |
+| `JWT_PUBLIC_KEY` | No | — | RSA public key (deprecated, use Auth0) |
+| `JWT_ACCESS_TOKEN_EXP_SECONDS` | No | `3600` | Access token TTL (legacy) |
+| `JWT_REFRESH_TOKEN_EXP_SECONDS` | No | `2592000` | Refresh token TTL (legacy) |
+| `JWT_ISSUER` | No | `ouroboros.ai/auth` | Token issuer claim (legacy) |
+| `JWT_AUDIENCE` | No | `ouroboros-api` | Token audience claim (legacy) |
 | **Agent Services** ||||
 | `STUDENT_PROFILE_SERVICE_URL` | No | `http://localhost:8001` | Student Profile agent URL |
 | `PROGRAM_DISCOVERY_SERVICE_URL` | No | `http://localhost:8002` | Program Discovery agent URL |
@@ -308,7 +329,7 @@ Resolution logic lives in the `settings.get_db_*()` helpers in `app/config.py`.
 
 | Table | Purpose |
 |-------|---------|
-| `users` | User records with bcrypt password hashes |
+| `users` | User records with Auth0 identity mapping (`auth0_sub`) |
 | `chats` | Chat sessions (one chat = one workflow run) |
 | `messages` | Chat messages (user, assistant, system roles) |
 | `workflow_runs` | Workflow state machine with current/last-successful state |
@@ -521,8 +542,8 @@ docker build -t ouroboros-orchestrator .
 docker run -p 8000:8000 \
   -e DB_HOST=mysql-host \
   -e DB_PASSWORD=secret \
-  -e JWT_PRIVATE_KEY="..." \
-  -e JWT_PUBLIC_KEY="..." \
+  -e AUTH0_DOMAIN=your-tenant.us.auth0.com \
+  -e AUTH0_API_AUDIENCE=https://api.ouroboros.ai \
   ouroboros-orchestrator
 ```
 
@@ -535,28 +556,29 @@ ouroboros-ai-orchestrator/
 ├── app/
 │   ├── api/                     # Route handlers (thin layer)
 │   │   ├── health.py            # GET / and /health
-│   │   ├── auth.py              # POST /auth/signup, /login, /refresh, /logout, GET /me
+│   │   ├── auth.py              # GET /auth/me, POST /auth/logout (Auth0)
 │   │   ├── chats.py             # Chat session CRUD
 │   │   ├── workflows.py         # Workflow orchestration
 │   │   ├── profiles.py          # Proxy → Student Profile agent
 │   │   └── dashboard.py         # Aggregated results view
 │   ├── core/                    # Infrastructure
+│   │   ├── auth0.py             # Auth0 JWT validation via JWKS
 │   │   ├── database.py          # aiomysql async connection pool (no ORM)
 │   │   ├── logging.py           # structlog configuration
-│   │   └── security.py          # JWT RS256 create / decode
+│   │   └── security.py          # JWT RS256 create / decode (legacy)
 │   ├── models/                  # Pydantic request / response schemas
 │   │   ├── common.py            # StandardResponse, PaginatedResponse
-│   │   ├── auth.py              # SignupRequest, LoginRequest, TokenResponse
+│   │   ├── auth.py              # UserResponse, UserUpdateRequest
 │   │   ├── chat.py              # ChatCreate, MessageCreate, ChatResponse
 │   │   ├── workflow.py          # WorkflowState, WorkflowRunResponse
 │   │   └── agent_payloads.py    # Request/response schemas for each agent
-│   ├── db/repositories/         # Raw SQL data access (aiomysql)
-│   │   ├── user_repo.py
+│   ├── repositories/            # Raw SQL data access (aiomysql)
+│   │   ├── user_repo.py         # User CRUD with Auth0 support
 │   │   ├── chat_repo.py
 │   │   ├── workflow_repo.py
 │   │   └── agent_log_repo.py
 │   ├── services/                # Business logic
-│   │   ├── auth_service.py      # Signup, login, token management
+│   │   ├── auth_service.py      # Auth service (legacy)
 │   │   ├── chat_service.py      # Chat session orchestration
 │   │   ├── workflow_service.py  # State machine logic
 │   │   └── aggregation_service.py
@@ -568,20 +590,22 @@ ouroboros-ai-orchestrator/
 │   │   ├── eligibility_client.py
 │   │   └── application_support_client.py
 │   ├── middleware/              # Middleware
-│   │   ├── auth_middleware.py   # JWT validation dependency
+│   │   ├── auth_middleware.py   # Auth0 JWT validation + JIT provisioning
 │   │   └── logging_middleware.py
 │   ├── utils/                   # Utilities
 │   │   ├── exceptions.py        # Custom exception hierarchy
 │   │   └── trace_id.py          # UUID-v4 trace ID generation
-│   ├── config.py                # Pydantic settings
+│   ├── config.py                # Pydantic settings (incl. Auth0)
 │   └── main.py                  # FastAPI app with lifespan
-├── migrations/                  # SQL migration files (001-003)
+├── migrations/                  # SQL migration files (001-004)
 ├── scripts/
 │   ├── run_migrations.py        # Execute migrations in order
-│   ├── seed_test_data.py        # Seed test users
+│   ├── seed_test_data.py        # Seed test users (Auth0 format)
 │   └── generate_service_token.py
 ├── tests/
 │   ├── unit/                    # Unit tests
+│   │   ├── test_auth0.py        # Auth0 validation tests
+│   │   └── ...
 │   └── integration/             # Integration tests
 ├── .github/workflows/
 │   └── deploy.yml               # CI/CD pipeline

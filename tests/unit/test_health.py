@@ -14,11 +14,13 @@ def test_root_returns_healthy():
     body = response.json()
     assert body["status"] == "healthy"
     assert body["version"] == APP_VERSION
+    assert body["message"] == "Ouroboros Orchestrator Service"
 
 
 def test_health_endpoint():
     response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "healthy"
-    assert "version" in body
+    assert body["status"] in ("healthy", "degraded")
+    assert body["version"] == APP_VERSION
+    assert body["database"] in ("connected", "not_connected", "error")

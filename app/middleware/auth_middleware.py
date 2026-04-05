@@ -8,8 +8,9 @@ when a user authenticates for the first time.
 from typing import Any
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import OAuth2AuthorizationCodeBearer
 
+from app.config import settings
 from app.core.auth0 import validate_auth0_token
 from app.core.database import get_pool
 from app.core.logging import get_logger
@@ -17,11 +18,20 @@ from app.repositories.user_repo import UserRepository
 
 logger = get_logger(__name__)
 
-bearer_scheme = HTTPBearer()
+# OAuth2 scheme that integrates with Swagger UI's Auth0 flow
+oauth2_scheme = OAuth2AuthorizationCodeBearer(
+    authorizationUrl=f"https://{settings.AUTH0_DOMAIN}/authorize",
+    tokenUrl=f"https://{settings.AUTH0_DOMAIN}/oauth/token",
+    scopes={
+        "openid": "OpenID Connect",
+        "profile": "User profile",
+        "email": "Email address",
+    },
+)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    token: str = Depends(oauth2_scheme),
 ) -> dict[str, Any]:
     """
     FastAPI dependency — validates Auth0 JWT from Authorization header.
@@ -29,13 +39,12 @@ async def get_current_user(
     Returns the decoded token claims from Auth0.
     Use this when you need access to the full token payload.
     """
-    token = credentials.credentials
     claims = await validate_auth0_token(token)
     return claims
 
 
 async def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    token: str = Depends(oauth2_scheme),
 ) -> str:
     """
     FastAPI dependency — validates Auth0 JWT and returns local user UUID.
@@ -50,7 +59,6 @@ async def get_current_user_id(
     Raises:
         HTTPException 401 if token is invalid or missing.
     """
-    token = credentials.credentials
     claims = await validate_auth0_token(token)
 
     auth0_sub = claims.get("sub")

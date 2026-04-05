@@ -1,4 +1,4 @@
-"""Execute database migrations in numerical order."""
+"""Execute database migrations in numerical order with tracking."""
 
 import re
 from pathlib import Path
@@ -8,9 +8,30 @@ from db_utils import ensure_database_exists, get_connection
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
+CREATE_MIGRATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(255) PRIMARY KEY,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+
+def get_applied_migrations(cursor) -> set:
+    """Return set of already-applied migration filenames."""
+    cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
+    return {row[0] for row in cursor.fetchall()}
+
+
+def record_migration(cursor, filename: str) -> None:
+    """Record a migration as applied."""
+    cursor.execute(
+        "INSERT INTO schema_migrations (version) VALUES (%s)",
+        (filename,),
+    )
+
 
 def run_migrations():
-    """Run all SQL migration files in migrations/ directory."""
+    """Run all pending SQL migration files in migrations/ directory."""
     migrations_dir = ROOT_DIR / "migrations"
     if not migrations_dir.exists():
         print("No migrations directory found.")
@@ -26,7 +47,22 @@ def run_migrations():
     conn = get_connection()
     cursor = conn.cursor()
 
-    for sql_file in sql_files:
+    # Ensure migrations tracking table exists
+    cursor.execute(CREATE_MIGRATIONS_TABLE)
+    conn.commit()
+
+    applied = get_applied_migrations(cursor)
+    pending = [f for f in sql_files if f.name not in applied]
+
+    if not pending:
+        print("All migrations already applied.")
+        cursor.close()
+        conn.close()
+        return
+
+    print(f"Found {len(pending)} pending migration(s).\n")
+
+    for sql_file in pending:
         print(f"Running migration: {sql_file.name}")
         sql = sql_file.read_text(encoding="utf-8")
 
@@ -39,6 +75,7 @@ def run_migrations():
                     print(f"  Error in {sql_file.name}: {err}")
                     raise
 
+        record_migration(cursor, sql_file.name)
         conn.commit()
         print(f"  ✓ {sql_file.name} applied")
 

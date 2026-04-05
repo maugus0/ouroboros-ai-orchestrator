@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # ========== Auth0 Configuration ==========
     AUTH0_DOMAIN: str = ""  # e.g., "ouroboros-dev.us.auth0.com"
     AUTH0_API_AUDIENCE: str = ""  # e.g., "https://api.ouroboros.ai"
+    AUTH0_CLIENT_ID: str = ""  # SPA app Client ID (for Swagger OAuth2 flow)
     AUTH0_ALGORITHMS: str = "RS256"  # Comma-separated if multiple
 
     # ========== JWT (RS256 - Legacy, kept for backward compatibility) ==========
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     USE_MOCK_DATA: bool = True
     ALLOW_DB_FAILURE: bool = False
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
+    CORS_ORIGINS: str = "http://localhost:8080,http://localhost:3000,http://localhost:5173"
 
     # ========== Docker ==========
     RUN_STARTUP_SCRIPTS: bool = True

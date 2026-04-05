@@ -1,6 +1,6 @@
 # Ouroboros Orchestrator Service
 
-Central coordination service for the **Ouroboros AI** scholarship discovery platform. The Orchestrator is the single backend entry-point the frontend communicates with — it handles authentication, workflow coordination, agent delegation, result aggregation, and audit logging.
+Central coordination service for the **Ouroboros AI** scholarship discovery platform. The Orchestrator is the single backend entry-point the frontend communicates with — starting with authentication and health monitoring, with business logic (workflows, agents, chats) to be added incrementally.
 
 ---
 
@@ -8,7 +8,6 @@ Central coordination service for the **Ouroboros AI** scholarship discovery plat
 
 - [Overview](#overview)
 - [Architecture](#architecture)
-- [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
@@ -29,19 +28,14 @@ Central coordination service for the **Ouroboros AI** scholarship discovery plat
 The Orchestrator Service is the **central nervous system** of the Ouroboros AI platform:
 
 1. **Authenticates users** via Auth0 (JWT validation with JWKS)
-2. **Manages chat sessions** and message history
-3. **Drives a sequential workflow** state machine: Profile → Programs → Scholarships → Eligibility → Application Support
-4. **Delegates to 5 agent microservices** via HTTP (httpx + tenacity retry)
-5. **Aggregates results** from all agents into self-contained JSON blobs
-6. **Audit-logs every agent call** with request/response payloads, latency, and trace IDs
+2. **Provisions users on first login** (JIT — Just-In-Time)
+3. **Exposes a health endpoint** for monitoring and readiness checks
 
 **Key Design Principles:**
 
 - Single entry-point — the frontend communicates **only** with the orchestrator
-- Agent isolation — microservices never call each other; the orchestrator fans out
 - No ORM overhead — raw SQL with `aiomysql` async connection pool
-- Retry resilience — exponential backoff on all inter-service HTTP calls
-- Trace propagation — `X-Trace-ID` header flows through every agent call for correlated debugging
+- Trace propagation — `X-Trace-ID` header flows through every request for correlated debugging
 
 ---
 
@@ -50,7 +44,7 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 ```
 ┌─────────────────────────────────────┐
 │       Frontend (React + Vite)       │
-│       (http://localhost:3000)       │
+│       (http://localhost:8080)       │
 └──────────────┬──────────────────────┘
                │
                │ JWT Bearer Token
@@ -60,36 +54,19 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 │                                                      │
 │  ┌─────────────────────────────────────────────┐     │
 │  │  API Layer (FastAPI)                        │     │
-│  │  POST /auth/signup, /login, /refresh        │     │
-│  │  GET  /auth/me                              │     │
-│  │  CRUD /chats                                │     │
-│  │  POST /workflows/{id}/start                 │     │
-│  │  GET  /dashboard/{id}                       │     │
+│  │  GET  /auth/me   PATCH /auth/me             │     │
+│  │  POST /auth/logout                          │     │
+│  │  GET  / and /health                         │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
-│  │  Service Layer                              │     │
-│  │  AuthService        (signup, login, tokens) │     │
-│  │  ChatService        (session management)    │     │
-│  │  WorkflowService    (state machine)         │     │
-│  │  AggregationService (combine results)       │     │
-│  └─────────────────────┬───────────────────────┘     │
-│                        │                             │
-│  ┌─────────────────────▼───────────────────────┐     │
-│  │  Client Layer (httpx + tenacity)            │     │
-│  │  StudentProfileClient     → :8001           │     │
-│  │  ProgramDiscoveryClient   → :8002           │     │
-│  │  ScholarshipDiscovClient  → :8003           │     │
-│  │  EligibilityClient        → :8004           │     │
-│  │  ApplicationSupportClient → :8005           │     │
+│  │  Auth0 JWT Validation (JWKS)                │     │
+│  │  JIT User Provisioning                      │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
 │  │  Repository Layer (Raw SQL / aiomysql)      │     │
 │  │  UserRepository                             │     │
-│  │  ChatRepository                             │     │
-│  │  WorkflowRepository                         │     │
-│  │  AgentCallLogRepository                     │     │
 │  └─────────────────────────────────────────────┘     │
 └──────────────┬───────────────────────────────────────┘
                │
@@ -100,38 +77,14 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
       └─────────────────┘
 ```
 
-### Workflow State Machine
-
-```
-INITIATED → PROFILE_PARSING → PROFILE_COMPLETE
-  → DISCOVERING_PROGRAMS → DISCOVERING_SCHOLARSHIPS
-  → MATCHING → GENERATING_MATERIALS → COMPLETE
-  (any state may transition to ERROR; retry resumes from last successful state)
-```
-
 ### Authentication Strategy
 
 | Concern | Approach |
 |---------|----------|
 | User → Orchestrator | **Auth0** JWT RS256 (validated via JWKS) |
-| Orchestrator → Agent | `X-Service-Token` shared secret header |
 | Password storage | **Auth0** (passwords never stored locally) |
 | Token types | Auth0 Access Token + Refresh Token |
 | User provisioning | **JIT** (Just-In-Time) — users created on first login |
-
----
-
-## Features
-
-- **Auth0 integration** with JWT validation via JWKS and JIT user provisioning
-- **Sequential workflow** state machine with retry-from-last-success on failure
-- **5 agent HTTP clients** with exponential backoff retry (tenacity)
-- **Structured logging** via structlog with JSON output in production
-- **Distributed tracing** via `X-Trace-ID` propagation across all agent calls
-- **Audit logging** for every agent HTTP call (request, response, latency, status)
-- **CORS configuration** for frontend development
-- **Docker Compose** for local development with MySQL 8.0
-- **Comprehensive CI/CD** pipeline with formatting, linting, tests, security, and Docker build
 
 ---
 
@@ -175,9 +128,9 @@ python -m pip install -r requirements-dev.txt
 3. **Create an Application** (for your frontend):
    - Go to **Applications → Applications → Create Application**
    - Type: **Single Page Application** (for React frontend)
-   - Configure **Allowed Callback URLs**: `http://localhost:3000/callback`
-   - Configure **Allowed Logout URLs**: `http://localhost:3000`
-   - Configure **Allowed Web Origins**: `http://localhost:3000`
+   - Configure **Allowed Callback URLs**: `http://localhost:8080/callback` (use your React dev URL and path)
+   - Configure **Allowed Logout URLs**: `http://localhost:8080`
+   - Configure **Allowed Web Origins**: `http://localhost:8080`
 
 4. **Note your credentials**:
    - Auth0 Domain (e.g., `your-tenant.us.auth0.com`)
@@ -226,18 +179,7 @@ mysql -u root -p -e "CREATE DATABASE ouroboros_orchestrator_db CHARACTER SET utf
 python scripts/run_migrations.py
 ```
 
-Expected output:
-
-```
-Running migration: 001_create_users.sql
-  ✓ 001_create_users.sql applied
-Running migration: 002_create_chats_messages.sql
-  ✓ 002_create_chats_messages.sql applied
-Running migration: 003_create_workflow_tables.sql
-  ✓ 003_create_workflow_tables.sql applied
-
-All migrations applied successfully.
-```
+The migration runner tracks applied migrations in a `schema_migrations` table, so it is safe to run multiple times.
 
 ### 6. (Optional) Seed Test Data
 
@@ -277,36 +219,15 @@ Swagger docs are available at `http://localhost:8000/docs`.
 | `DB_USERNAME` | No | `root` | MySQL user |
 | `DB_PASSWORD` | Yes | — | MySQL password |
 | `DB_POOL_SIZE` | No | `10` | Max connections in pool |
-| `DB_POOL_NAME` | No | `orchestrator_pool` | Connection pool name |
 | `DB_CONNECTION_TIMEOUT` | No | `20` | Connection timeout (seconds) |
 | **Auth0 Configuration** ||||
 | `AUTH0_DOMAIN` | Yes | — | Auth0 tenant domain (e.g., `your-tenant.us.auth0.com`) |
 | `AUTH0_API_AUDIENCE` | Yes | — | Auth0 API identifier (e.g., `https://api.ouroboros.ai`) |
 | `AUTH0_ALGORITHMS` | No | `RS256` | JWT signing algorithms (comma-separated) |
-| **JWT Authentication (Legacy)** ||||
-| `JWT_PRIVATE_KEY` | No | — | RSA private key (deprecated, use Auth0) |
-| `JWT_PUBLIC_KEY` | No | — | RSA public key (deprecated, use Auth0) |
-| `JWT_ACCESS_TOKEN_EXP_SECONDS` | No | `3600` | Access token TTL (legacy) |
-| `JWT_REFRESH_TOKEN_EXP_SECONDS` | No | `2592000` | Refresh token TTL (legacy) |
-| `JWT_ISSUER` | No | `ouroboros.ai/auth` | Token issuer claim (legacy) |
-| `JWT_AUDIENCE` | No | `ouroboros-api` | Token audience claim (legacy) |
-| **Agent Services** ||||
-| `STUDENT_PROFILE_SERVICE_URL` | No | `http://localhost:8001` | Student Profile agent URL |
-| `PROGRAM_DISCOVERY_SERVICE_URL` | No | `http://localhost:8002` | Program Discovery agent URL |
-| `SCHOLARSHIP_DISCOVERY_SERVICE_URL` | No | `http://localhost:8003` | Scholarship Discovery agent URL |
-| `ELIGIBILITY_SERVICE_URL` | No | `http://localhost:8004` | Eligibility Engine agent URL |
-| `APPLICATION_SUPPORT_SERVICE_URL` | No | `http://localhost:8005` | Application Support agent URL |
-| **Inter-Service Auth** ||||
-| `X_SERVICE_TOKEN` | Yes | — | Shared secret for orchestrator → agent calls |
-| **HTTP Client** ||||
-| `AGENT_CALL_TIMEOUT` | No | `30` | Agent HTTP call timeout (seconds) |
-| `AGENT_CALL_RETRIES` | No | `2` | Max retry attempts per agent call |
-| `AGENT_CALL_BACKOFF_FACTOR` | No | `1.0` | Exponential backoff multiplier |
 | **Application** ||||
 | `LOG_LEVEL` | No | `INFO` | `DEBUG\|INFO\|WARNING\|ERROR\|CRITICAL` |
-| `USE_MOCK_DATA` | No | `true` | Use in-memory repos (tests only) |
 | `ALLOW_DB_FAILURE` | No | `false` | Continue if DB unavailable (tests only) |
-| `CORS_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated allowed origins |
+| `CORS_ORIGINS` | No | `http://localhost:8080,...` | Comma-separated allowed origins |
 | **Docker** ||||
 | `DOCKER_MYSQL_PORT` | No | `3307` | Host port for MySQL container |
 
@@ -333,26 +254,11 @@ Resolution logic lives in the `settings.get_db_*()` helpers in `app/config.py`.
 | Table | Purpose |
 |-------|---------|
 | `users` | User records with Auth0 identity mapping (`auth0_sub`) |
-| `chats` | Chat sessions (one chat = one workflow run) |
-| `messages` | Chat messages (user, assistant, system roles) |
-| `workflow_runs` | Workflow state machine with current/last-successful state |
-| `workflow_results` | Aggregated JSON blobs from all agent outputs |
-| `agent_call_logs` | Audit trail — HTTP status, latency, request/response payloads |
-
-### Relationships
-
-```
-users           (1) ──< (N) chats
-users           (1) ──< (N) workflow_runs
-chats           (1) ──< (N) messages
-chats           (1) ──  (1) workflow_runs
-workflow_runs   (1) ──< (N) workflow_results
-workflow_runs   (1) ──< (N) agent_call_logs
-```
+| `schema_migrations` | Tracks which SQL migrations have been applied |
 
 ### Migrations
 
-Run in order via `python scripts/run_migrations.py`:
+Run via `python scripts/run_migrations.py` (idempotent — skips already-applied files):
 
 ```
 migrations/
@@ -368,13 +274,6 @@ migrations/
 
 **Base URL**: `http://localhost:8000`
 
-### Health
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | No | Root health check |
-| GET | `/health` | No | Detailed health status |
-
 ### Authentication
 
 | Method | Path | Auth | Description |
@@ -388,35 +287,12 @@ migrations/
 
 > **Note**: Auth0 handles user registration, login, and token refresh. The deprecated endpoints return instructions directing clients to Auth0 Universal Login.
 
-### Chats
+### Health
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/chats/` | Bearer | Create a new chat session |
-| GET | `/chats/` | Bearer | List all chats for the user |
-| GET | `/chats/{chat_id}` | Bearer | Retrieve a single chat with messages |
-| DELETE | `/chats/{chat_id}` | Bearer | Soft-delete a chat session |
-
-### Workflows
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/workflows/{chat_id}/start` | Bearer | Kick off the agent workflow |
-| GET | `/workflows/{chat_id}/status` | Bearer | Return current workflow state |
-| POST | `/workflows/{chat_id}/retry` | Bearer | Retry from last successful state |
-
-### Profiles (Proxy)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/profiles/parse` | Bearer | Upload CV via Student Profile agent |
-| GET | `/profiles/me` | Bearer | Get current user's parsed profile |
-
-### Dashboard
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/dashboard/{chat_id}` | Bearer | Aggregated results from all agents |
+| GET | `/` | No | Root health check |
+| GET | `/health` | No | Detailed health status |
 
 ---
 
@@ -472,9 +348,9 @@ open htmlcov/index.html
 tests/
 ├── conftest.py                  # Shared fixtures
 ├── unit/
+│   ├── test_auth0.py            # Auth0 JWT validation tests
 │   ├── test_config.py           # Configuration loading
 │   ├── test_health.py           # Health check endpoints
-│   ├── test_security.py         # JWT creation and validation
 │   ├── test_exceptions.py       # Custom exception classes
 │   └── test_trace_id.py         # Trace ID generation
 └── integration/
@@ -494,12 +370,12 @@ tests/
 | Stage | Description |
 |-------|-------------|
 | **Format** | Black + isort validation |
-| **Lint** | **flake8** + **pylint** (both blocking; same disables as local: `C0111`, `R0903`) |
+| **Lint** | **flake8** + **pylint** (both blocking) |
 | **Unit Tests** | pytest with JUnit XML output |
-| **Type Check** | **mypy** static analysis — blocking (after format + lint) |
-| **Integration Tests** | pytest with coverage HTML + XML (after format + lint) |
-| **Security Audit** | Bandit static security analysis (after format + lint) |
-| **Docker Build** | Verify image builds — no push (after all above) |
+| **Type Check** | **mypy** static analysis |
+| **Integration Tests** | pytest with coverage HTML + XML |
+| **Security Audit** | Bandit static security analysis |
+| **Docker Build** | Verify image builds — no push |
 | **Summary** | Markdown table of all job results |
 
 ### Pipeline Graph
@@ -513,19 +389,6 @@ lint   ──┤                  │
          └──> security   ──┘
               
 unit-tests (independent) ──────> build-docker
-```
-
-### Local CI Simulation
-
-```bash
-black --check app/ tests/
-isort --check-only app/ tests/
-flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
-pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903
-mypy app/ --ignore-missing-imports --no-strict-optional
-ALLOW_DB_FAILURE=true pytest tests/ -v
-bandit -r app/ || true
-docker build -t ouroboros-orchestrator .
 ```
 
 ---
@@ -561,45 +424,22 @@ docker run -p 8000:8000 \
 ```
 ouroboros-ai-orchestrator/
 ├── app/
-│   ├── api/                     # Route handlers (thin layer)
-│   │   ├── health.py            # GET / and /health
-│   │   ├── auth.py              # GET /auth/me, POST /auth/logout (Auth0)
-│   │   ├── chats.py             # Chat session CRUD
-│   │   ├── workflows.py         # Workflow orchestration
-│   │   ├── profiles.py          # Proxy → Student Profile agent
-│   │   └── dashboard.py         # Aggregated results view
+│   ├── api/                     # Route handlers
+│   │   ├── auth.py              # Auth0 endpoints (me, logout, deprecated signup/login)
+│   │   └── health.py            # GET / and /health
 │   ├── core/                    # Infrastructure
 │   │   ├── auth0.py             # Auth0 JWT validation via JWKS
-│   │   ├── database.py          # aiomysql async connection pool (no ORM)
-│   │   ├── logging.py           # structlog configuration
-│   │   └── security.py          # JWT RS256 create / decode (legacy)
+│   │   ├── database.py          # aiomysql async connection pool
+│   │   └── logging.py           # structlog configuration
 │   ├── models/                  # Pydantic request / response schemas
 │   │   ├── common.py            # StandardResponse, PaginatedResponse
-│   │   ├── auth.py              # UserResponse, UserUpdateRequest
-│   │   ├── chat.py              # ChatCreate, MessageCreate, ChatResponse
-│   │   ├── workflow.py          # WorkflowState, WorkflowRunResponse
-│   │   └── agent_payloads.py    # Request/response schemas for each agent
+│   │   └── auth.py              # UserResponse, UserUpdateRequest
 │   ├── repositories/            # Raw SQL data access (aiomysql)
-│   │   ├── user_repo.py         # User CRUD with Auth0 support
-│   │   ├── chat_repo.py
-│   │   ├── workflow_repo.py
-│   │   └── agent_log_repo.py
-│   ├── services/                # Business logic
-│   │   ├── auth_service.py      # Auth service (legacy)
-│   │   ├── chat_service.py      # Chat session orchestration
-│   │   ├── workflow_service.py  # State machine logic
-│   │   └── aggregation_service.py
-│   ├── clients/                 # HTTP clients to agent services
-│   │   ├── base_client.py       # Shared httpx client with retry
-│   │   ├── student_profile_client.py
-│   │   ├── program_discovery_client.py
-│   │   ├── scholarship_discovery_client.py
-│   │   ├── eligibility_client.py
-│   │   └── application_support_client.py
-│   ├── middleware/              # Middleware
+│   │   └── user_repo.py         # User CRUD with Auth0 support
+│   ├── middleware/
 │   │   ├── auth_middleware.py   # Auth0 JWT validation + JIT provisioning
 │   │   └── logging_middleware.py
-│   ├── utils/                   # Utilities
+│   ├── utils/
 │   │   ├── exceptions.py        # Custom exception hierarchy
 │   │   └── trace_id.py          # UUID-v4 trace ID generation
 │   ├── config.py                # Pydantic settings (incl. Auth0)
@@ -607,14 +447,17 @@ ouroboros-ai-orchestrator/
 ├── migrations/                  # SQL migration files (001-004)
 ├── scripts/
 │   ├── db_utils.py              # Shared DB connection helpers
-│   ├── run_migrations.py        # Execute migrations in order
+│   ├── run_migrations.py        # Execute migrations in order (with tracking)
 │   ├── seed_test_data.py        # Seed test users (Auth0 format)
 │   └── generate_service_token.py
 ├── tests/
-│   ├── unit/                    # Unit tests
+│   ├── unit/
 │   │   ├── test_auth0.py        # Auth0 validation tests
-│   │   └── ...
-│   └── integration/             # Integration tests
+│   │   ├── test_config.py
+│   │   ├── test_health.py
+│   │   ├── test_exceptions.py
+│   │   └── test_trace_id.py
+│   └── integration/             # Future integration tests
 ├── .github/workflows/
 │   └── deploy.yml               # CI/CD pipeline
 ├── requirements.txt
@@ -649,21 +492,26 @@ mysql -h localhost -P 3307 -u root -p -e "SHOW DATABASES;"
 grep DB_ .env
 ```
 
-### JWT Key Errors
+### Auth0: `Service not found` / `access_denied` for your audience
 
-**Symptom**: `jwt.exceptions.DecodeError` or empty token responses
+**Symptom**: Swagger or the SPA shows something like `[access_denied]: Service not found: https://api.ouroboros.ai`.
 
-```bash
-# Verify keys exist
-ls -la jwt_private.pem jwt_public.pem
+**Cause**: The `audience` sent to Auth0 (your `AUTH0_API_AUDIENCE` in `.env`) must **exactly match** the **Identifier** of an **API** registered in **your** Auth0 tenant. Auth0 is not checking whether your FastAPI server is deployed; it only checks whether that API resource exists in the dashboard.
 
-# Regenerate if needed
-openssl genrsa -out jwt_private.pem 2048
-openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
+**Fix (pick one)**:
 
-# Verify keys match
-openssl rsa -in jwt_private.pem -pubout | diff - jwt_public.pem
-```
+1. **Register the API in Auth0** (recommended if you want to keep `https://api.ouroboros.ai`):
+   - Dashboard → **Applications** → **APIs** → **Create API**
+   - **Name**: e.g. `Ouroboros API`
+   - **Identifier**: must be **exactly** `https://api.ouroboros.ai` (same string as `AUTH0_API_AUDIENCE`)
+   - Signing algorithm: **RS256**
+   - Save
+
+2. **Or align `.env` with an API you already created**:
+   - Open **APIs** in Auth0 and copy the **Identifier** of your API (e.g. `https://dev-orchestrator-api/`).
+   - Set `AUTH0_API_AUDIENCE` in `.env` to that **exact** value (and restart the orchestrator).
+
+**Also check**: Under your SPA application, **Allowed Callback URLs** must include `http://localhost:8000/docs/oauth2-redirect` if you use Swagger’s OAuth flow.
 
 ### Import Errors
 
@@ -671,19 +519,7 @@ openssl rsa -in jwt_private.pem -pubout | diff - jwt_public.pem
 
 ```bash
 source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Agent Service Unreachable
-
-**Symptom**: `AgentCallError: [student_profile] HTTP 502`
-
-```bash
-# Check agent service is running
-curl http://localhost:8001/health
-
-# Verify URLs in .env
-grep SERVICE_URL .env
+python -m pip install -r requirements.txt
 ```
 
 ---

@@ -1,25 +1,68 @@
 """Health-check endpoints."""
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from app.config import APP_VERSION
+from app.core.database import get_pool
+
+
+class HealthResponse(BaseModel):
+    """Health check response model."""
+
+    status: str
+    version: str
+    database: str
+
+
+class RootResponse(BaseModel):
+    """Root endpoint response model."""
+
+    message: str
+    version: str
+    status: str
+
 
 router = APIRouter(tags=["Health"])
 
 
-@router.get("/")
+@router.get("/", response_model=RootResponse)
 async def root():
-    return {
-        "message": "Ouroboros Orchestrator Service",
-        "version": APP_VERSION,
-        "status": "healthy",
-    }
+    """
+    Root endpoint - basic service info.
+
+    Returns service name, version, and status.
+    """
+    return RootResponse(
+        message="Ouroboros Orchestrator Service",
+        version=APP_VERSION,
+        status="healthy",
+    )
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse)
 async def health_check():
-    return {
-        "status": "healthy",
-        "version": APP_VERSION,
-        "database": "not_connected",
-    }
+    """
+    Detailed health check endpoint.
+
+    Checks database connectivity and returns overall service health.
+    Use this endpoint for readiness probes in Kubernetes/Docker.
+    """
+    db_status = "not_connected"
+
+    try:
+        pool = get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+                    await cursor.fetchone()
+                    db_status = "connected"
+    except (RuntimeError, OSError, ConnectionError):
+        db_status = "error"
+
+    return HealthResponse(
+        status="healthy" if db_status == "connected" else "degraded",
+        version=APP_VERSION,
+        database=db_status,
+    )

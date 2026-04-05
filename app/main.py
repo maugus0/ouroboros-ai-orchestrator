@@ -5,9 +5,8 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
 
-from app.api import auth, chats, dashboard, health, profiles, workflows
+from app.api import auth, health
 from app.config import APP_VERSION, settings
 from app.core.database import PoolConfig, close_pool, create_pool
 from app.core.logging import get_logger, setup_logging
@@ -59,6 +58,11 @@ app = FastAPI(
         "filter": True,
         "docExpansion": "none",
     },
+    swagger_ui_init_oauth={
+        "clientId": settings.AUTH0_CLIENT_ID,
+        "usePkceWithAuthorizationCodeGrant": True,
+        "additionalQueryStringParams": {"audience": settings.AUTH0_API_AUDIENCE},
+    },
 )
 
 # ── Middleware ────────────────────────────────────────────────────
@@ -72,38 +76,13 @@ app.add_middleware(
 )
 app.add_middleware(LoggingMiddleware)
 
-# ── Routers ──────────────────────────────────────────────────────
+# ── Routers (Authentication first, then Health) ──────────────────
 
-app.include_router(health.router)
 app.include_router(auth.router)
-app.include_router(chats.router)
-app.include_router(workflows.router)
-app.include_router(profiles.router)
-app.include_router(dashboard.router)
-
-
-# ── Custom OpenAPI ───────────────────────────────────────────────
-
-
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    schema["info"]["x-logo"] = {"url": "https://ouroboros.ai/logo.png"}
-    app.openapi_schema = schema
-    return schema
-
-
-app.openapi = custom_openapi  # type: ignore[method-assign]
+app.include_router(health.router)
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    # Local dev only; Docker/production uses Dockerfile CMD with 0.0.0.0.
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)

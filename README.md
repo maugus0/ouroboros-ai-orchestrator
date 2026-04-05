@@ -156,7 +156,10 @@ cd ouroboros-ai-orchestrator
 
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements-dev.txt
+
+# Use python -m pip to ensure packages install into the venv
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
 
 ### 2. Set Up Auth0
@@ -355,7 +358,8 @@ Run in order via `python scripts/run_migrations.py`:
 migrations/
 ├── 001_create_users.sql
 ├── 002_create_chats_messages.sql
-└── 003_create_workflow_tables.sql
+├── 003_create_workflow_tables.sql
+└── 004_add_auth0_fields.sql
 ```
 
 ---
@@ -375,11 +379,14 @@ migrations/
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/auth/signup` | No | Register a new user |
-| POST | `/auth/login` | No | Authenticate and receive JWT tokens |
-| POST | `/auth/refresh` | No | Exchange refresh token for new access token |
-| POST | `/auth/logout` | Bearer | Invalidate current session |
 | GET | `/auth/me` | Bearer | Return authenticated user profile |
+| PATCH | `/auth/me` | Bearer | Update authenticated user's name/email |
+| POST | `/auth/logout` | Bearer | Logout (instructs client to clear tokens) |
+| POST | `/auth/signup` | No | **Deprecated** — redirects to Auth0 |
+| POST | `/auth/login` | No | **Deprecated** — redirects to Auth0 |
+| POST | `/auth/refresh` | No | **Deprecated** — redirects to Auth0 |
+
+> **Note**: Auth0 handles user registration, login, and token refresh. The deprecated endpoints return instructions directing clients to Auth0 Universal Login.
 
 ### Chats
 
@@ -599,6 +606,7 @@ ouroboros-ai-orchestrator/
 │   └── main.py                  # FastAPI app with lifespan
 ├── migrations/                  # SQL migration files (001-004)
 ├── scripts/
+│   ├── db_utils.py              # Shared DB connection helpers
 │   ├── run_migrations.py        # Execute migrations in order
 │   ├── seed_test_data.py        # Seed test users (Auth0 format)
 │   └── generate_service_token.py

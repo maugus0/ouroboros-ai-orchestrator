@@ -1,5 +1,5 @@
 -- Migration 004: Add Auth0 integration fields
--- Auth0 owns password authentication; local DB stores user identity mapping.
+-- Auth0 owns password authentication. Local DB stores user identity mapping.
 -- Existing FKs (chats.user_id, workflow_runs.user_id) remain unchanged.
 
 -- Add auth0_sub column for Auth0 user identifier mapping
@@ -9,7 +9,7 @@ ALTER TABLE users
 
 -- Make password_hash nullable (Auth0 now owns passwords)
 ALTER TABLE users
-    MODIFY COLUMN password_hash TEXT NULL COMMENT 'Deprecated: Auth0 manages authentication';
+    MODIFY COLUMN password_hash TEXT NULL COMMENT 'Deprecated - Auth0 manages authentication';
 
 -- Add column to track authentication provider
 ALTER TABLE users

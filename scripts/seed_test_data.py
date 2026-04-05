@@ -1,32 +1,9 @@
 """Seed test data for local development with Auth0 authentication."""
 
-import sys
 import uuid
-from pathlib import Path
 
 import mysql.connector
-from dotenv import load_dotenv
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from app.config import settings
-
-load_dotenv(ROOT_DIR / ".env")
-
-
-def get_connection():
-    return mysql.connector.connect(
-        host=settings.get_db_host(),
-        port=settings.get_db_port(),
-        database=settings.get_db_name(),
-        user=settings.get_db_user(),
-        password=settings.get_db_password(),
-        charset="utf8mb4",
-        collation="utf8mb4_unicode_ci",
-    )
-
+from db_utils import get_connection
 
 # Test users with Auth0 subject identifiers
 # Create matching users in your Auth0 tenant for testing
@@ -66,6 +43,7 @@ ON DUPLICATE KEY UPDATE
 
 
 def seed():
+    """Insert test users into the database."""
     conn = get_connection()
     cursor = conn.cursor()
 

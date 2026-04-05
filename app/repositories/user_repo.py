@@ -125,25 +125,22 @@ class UserRepository:
         email: str | None = None,
     ) -> dict[str, Any] | None:
         """Update user profile fields."""
-        updates = []
-        params = []
-
-        if name is not None:
-            updates.append("name = %s")
-            params.append(name)
-        if email is not None:
-            updates.append("email = %s")
-            params.append(email)
-
-        if not updates:
+        if name is None and email is None:
             return await self.get_by_id(user_id)
 
-        params.append(user_id)
-        query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
+        if name is not None and email is not None:
+            query = "UPDATE users SET name = %s, email = %s WHERE id = %s"
+            params: tuple[Any, ...] = (name, email, user_id)
+        elif name is not None:
+            query = "UPDATE users SET name = %s WHERE id = %s"
+            params = (name, user_id)
+        else:
+            query = "UPDATE users SET email = %s WHERE id = %s"
+            params = (email, user_id)
 
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, tuple(params))
+                await cur.execute(query, params)
                 await conn.commit()
 
         return await self.get_by_id(user_id)

@@ -440,7 +440,7 @@ chmod +x pre-commit-check.sh
 ./pre-commit-check.sh
 ```
 
-Runs Black, isort, flake8, syntax validation, tests, pylint, and mypy in sequence (all must pass).
+Runs Black, isort, flake8, syntax validation, tests, pylint, Bandit (same rules as CI security scan), and mypy in sequence (all must pass).
 
 ---
 

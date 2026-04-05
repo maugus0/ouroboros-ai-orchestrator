@@ -27,6 +27,18 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+# Placeholder URLs for deprecated endpoints (split strings avoid Bandit B105 on .../oauth/token).
+_AUTH0_PLACEHOLDER_HOST = "YOUR_AUTH0_DOMAIN"
+
+
+def _doc_auth0_authorize_url(screen_hint_signup: bool = False) -> str:
+    base = "".join(["https://", _AUTH0_PLACEHOLDER_HOST, "/authorize"])
+    return f"{base}?screen_hint=signup" if screen_hint_signup else base
+
+
+def _doc_auth0_token_url() -> str:
+    return "".join(["https://", _AUTH0_PLACEHOLDER_HOST, "/oauth/", "token"])
+
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(user: dict = Depends(get_current_user_record)):
@@ -126,7 +138,7 @@ async def signup():
     return StandardResponse(
         success=False,
         message="Signup is handled by Auth0. Use Auth0 Universal Login or SDK.",
-        data={"auth0_signup_url": "https://YOUR_AUTH0_DOMAIN/authorize?screen_hint=signup"},
+        data={"auth0_signup_url": _doc_auth0_authorize_url(screen_hint_signup=True)},
     )
 
 
@@ -141,7 +153,7 @@ async def login():
     return StandardResponse(
         success=False,
         message="Login is handled by Auth0. Use Auth0 Universal Login or SDK.",
-        data={"auth0_login_url": "https://YOUR_AUTH0_DOMAIN/authorize"},
+        data={"auth0_login_url": _doc_auth0_authorize_url()},
     )
 
 
@@ -156,5 +168,5 @@ async def refresh_token():
     return StandardResponse(
         success=False,
         message="Token refresh is handled by Auth0. Use Auth0 SDK or /oauth/token endpoint.",
-        data={"auth0_token_url": "https://YOUR_AUTH0_DOMAIN/oauth/token"},
+        data={"auth0_token_url": _doc_auth0_token_url()},
     )

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     email               VARCHAR(255) NULL UNIQUE,
     about_me            TEXT         NULL,
     profession          VARCHAR(100) NULL,
-    interest            ENUM('jobs', 'startups', 'research') NULL,
+    interest            ENUM('jobs', 'startups', 'research', 'degree') NULL,
     profile_completed   BOOLEAN      DEFAULT FALSE
         COMMENT 'TRUE when email, about_me, profession, interest are all set (app-enforced)',
 

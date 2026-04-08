@@ -107,7 +107,7 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 | Refresh token | 7 day TTL, SHA-256 hashed in DB, rotation on use |
 | Phone verification | Twilio OTP (6-digit, 5 min expiry, max 3 attempts) |
 | Session tracking | `auth_sessions` table with `last_active_at`, `revoked_at` for duration metrics |
-| Profile completion | First login: email, about me, profession, interest (jobs/startups/research) |
+| Profile completion | First login: email, about me, profession, interest (jobs/startups/research/degree) |
 
 ---
 
@@ -277,7 +277,7 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 | `email` | VARCHAR(255) | Optional, set during profile completion |
 | `about_me` | TEXT | Short bio |
 | `profession` | VARCHAR(100) | User's profession |
-| `interest` | ENUM | `jobs`, `startups`, or `research` |
+| `interest` | ENUM | `jobs`, `startups`, `research`, or `degree` |
 | `profile_completed` | BOOLEAN | `true` only when email, about_me, profession, and interest are all set |
 
 ### Auth Sessions Table

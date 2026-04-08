@@ -85,7 +85,7 @@ class ProfileUpdateRequest(BaseModel):
     email: Optional[EmailStr] = Field(None, examples=["alice@example.com"])
     about_me: Optional[str] = Field(None, max_length=500, examples=["Full-stack dev passionate about AI"])
     profession: Optional[str] = Field(None, max_length=100, examples=["Software Engineer"])
-    interest: Optional[str] = Field(None, pattern=r"^(jobs|startups|research)$", examples=["startups"])
+    interest: Optional[str] = Field(None, pattern=r"^(jobs|startups|research|degree)$", examples=["startups"])
 
 
 # ── Responses ────────────────────────────────────────────────────

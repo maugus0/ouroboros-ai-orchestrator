@@ -216,7 +216,7 @@ async def update_profile(body: ProfileUpdateRequest, user_id: str = Depends(get_
     Complete or update user profile.
 
     After first login, the client should call this to set **email**,
-    **about_me**, **profession**, and **interest** (jobs / startups / research).
+    **about_me**, **profession**, and **interest** (jobs, startups, research, or degree).
     Any non-null field is updated; null fields are left unchanged.
 
     ``profile_completed`` becomes **true** only when **all four** are present

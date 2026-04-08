@@ -2,7 +2,7 @@
 
 from typing import Any, Mapping, Optional
 
-_VALID_INTERESTS = frozenset({"jobs", "startups", "research"})
+_VALID_INTERESTS = frozenset({"jobs", "startups", "research", "degree"})
 
 
 def is_profile_complete(user: Optional[Mapping[str, Any]]) -> bool:
@@ -10,7 +10,7 @@ def is_profile_complete(user: Optional[Mapping[str, Any]]) -> bool:
     Profile is complete when all onboarding fields are set:
 
     ``email``, non-empty ``about_me``, non-empty ``profession``, and ``interest``
-    (one of jobs / startups / research).
+    (one of jobs / startups / research / degree).
 
     Signup already collects ``first_name`` / ``last_name``; those are not part of this gate.
     """

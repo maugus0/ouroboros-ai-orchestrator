@@ -23,6 +23,15 @@ from app.utils.profile_completion import is_profile_complete
             {
                 "email": "a@b.com",
                 "about_me": "Hi",
+                "profession": "Student",
+                "interest": "degree",
+            },
+            True,
+        ),
+        (
+            {
+                "email": "a@b.com",
+                "about_me": "Hi",
                 "profession": "Dev",
                 "interest": None,
             },

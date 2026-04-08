@@ -13,7 +13,7 @@ from app.core.database import get_pool
 from app.core.logging import get_logger
 from app.repositories.auth_repo import AuthRepository
 from app.repositories.user_repo import UserRepository
-from app.services.twilio_service import TwilioService, get_twilio_service
+from app.services.twilio_service import SMSResult, TwilioService, get_twilio_service
 from app.utils.jwt_util import JWTUtil
 from app.utils.otp_util import can_request_new_otp, generate_otp, get_otp_expiry, is_otp_expired
 from app.utils.password_util import hash_password, verify_password
@@ -83,10 +83,10 @@ class AuthService:
         await self.user_repo.set_otp(user["id"], otp, get_otp_expiry())
 
         sms = await self.twilio.send_otp(e164, otp)
+        await self._log_otp_send(e164, sms, ip_address, user_agent)
+
         if not sms.success:
             logger.error("otp_send_failed_signup", user_id=user["id"], error=sms.error_message)
-
-        await self.auth_repo.log_otp_action(e164, "sent", ip_address, user_agent)
 
         logger.info("signup_complete", user_id=user["id"])
         return {
@@ -109,7 +109,7 @@ class AuthService:
         if user.get("phone_verified"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Phone already verified")
         if (user.get("otp_attempts") or 0) >= settings.OTP_MAX_ATTEMPTS:
-            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent)
+            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent, error_message="Max attempts")
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Request a new OTP.")
 
         if is_otp_expired(user.get("otp_expires_at")):
@@ -118,7 +118,7 @@ class AuthService:
 
         if not user.get("otp_code") or user["otp_code"] != otp_code:
             await self.user_repo.increment_otp_attempts(user["id"])
-            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent)
+            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent, error_message="Invalid code")
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code")
 
         await self.user_repo.verify_phone(user["id"])
@@ -159,10 +159,10 @@ class AuthService:
         await self.user_repo.set_otp(user["id"], otp, get_otp_expiry())
 
         sms = await self.twilio.send_otp(e164, otp)
+        await self._log_otp_send(e164, sms, ip_address, user_agent)
+
         if not sms.success:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to send OTP. Please try again.")
-
-        await self.auth_repo.log_otp_action(e164, "sent", ip_address, user_agent)
 
         logger.info("otp_resent", user_id=user["id"])
         return {"message": "OTP sent to your phone", "phone_number": mask_phone_number(e164)}
@@ -308,6 +308,24 @@ class AuthService:
         return await self.auth_repo.get_user_sessions(user_id, active_only=active_only)
 
     # ── private helpers ──────────────────────────────────────────
+
+    async def _log_otp_send(
+        self,
+        phone: str,
+        sms: SMSResult,
+        ip_address: Optional[str],
+        user_agent: Optional[str],
+    ) -> None:
+        """Log OTP send attempt with actual Twilio delivery result."""
+        await self.auth_repo.log_otp_action(
+            phone_number=phone,
+            action="sent" if sms.success else "send_failed",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            delivery_status="sent" if sms.success else "failed",
+            twilio_message_sid=sms.message_sid,
+            error_message=sms.error_message,
+        )
 
     async def _resolve_user(self, phone_number: Optional[str], username: Optional[str]) -> Optional[Dict[str, Any]]:
         """Look up user by phone number or username."""

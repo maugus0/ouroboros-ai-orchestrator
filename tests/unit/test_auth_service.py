@@ -22,7 +22,7 @@ def repos():
 @pytest.fixture
 def twilio_mock():
     svc = AsyncMock()
-    svc.send_otp.return_value = MagicMock(success=True, message_sid="SM123")
+    svc.send_otp.return_value = MagicMock(success=True, message_sid="SM123", error_message=None)
     return svc
 
 

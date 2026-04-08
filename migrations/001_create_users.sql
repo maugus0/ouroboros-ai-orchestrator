@@ -1,5 +1,8 @@
 -- Migration 001: Create Users, Auth Sessions, and OTP Logs tables
--- Idempotent: CREATE TABLE IF NOT EXISTS.
+-- Idempotent for re-runs: every object uses CREATE TABLE IF NOT EXISTS (no INSERT/ALTER).
+-- Safe to execute multiple times on the same database: existing tables are left unchanged.
+-- Note: If you already have these tables from an older schema, this file does NOT alter
+--       them; add a new numbered migration with ALTER TABLE for upgrades.
 -- Description: Phone-based authentication with OTP verification, session tracking,
 --              and profile completion flow.
 
@@ -64,16 +67,23 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- OTP audit log (for rate-limiting and compliance)
+-- OTP audit log (rate-limiting, delivery tracking, and compliance)
+-- Every OTP attempt is logged: send attempts (with Twilio delivery result),
+-- verification checks (success/fail), and expirations.
 CREATE TABLE IF NOT EXISTS otp_logs (
-    id            INT          AUTO_INCREMENT PRIMARY KEY,
-    phone_number  VARCHAR(20)  NOT NULL,
-    action        ENUM('sent', 'verified', 'failed', 'expired') NOT NULL,
-    ip_address    VARCHAR(50)  NULL,
-    user_agent    TEXT         NULL,
-    created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    id                  INT          AUTO_INCREMENT PRIMARY KEY,
+    phone_number        VARCHAR(20)  NOT NULL,
+    action              ENUM('sent', 'send_failed', 'verified', 'failed', 'expired') NOT NULL,
+    delivery_status     ENUM('pending', 'sent', 'failed') NULL COMMENT 'Twilio delivery outcome (for send actions)',
+    twilio_message_sid  VARCHAR(100) NULL COMMENT 'Twilio Message/Verification SID',
+    error_message       TEXT         NULL COMMENT 'Error details when delivery or verification fails',
+    ip_address          VARCHAR(50)  NULL,
+    user_agent          TEXT         NULL,
+    created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
 
-    INDEX idx_phone_number (phone_number),
-    INDEX idx_action       (action),
-    INDEX idx_created_at   (created_at)
+    INDEX idx_phone_number      (phone_number),
+    INDEX idx_action             (action),
+    INDEX idx_delivery_status    (delivery_status),
+    INDEX idx_twilio_sid         (twilio_message_sid),
+    INDEX idx_created_at         (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -133,18 +133,27 @@ class AuthRepository:
 
     # ── OTP audit log ────────────────────────────────────────────
 
-    async def log_otp_action(
+    async def log_otp_action(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         phone_number: str,
         action: str,
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
+        delivery_status: Optional[str] = None,
+        twilio_message_sid: Optional[str] = None,
+        error_message: Optional[str] = None,
     ) -> None:
+        """Log an OTP lifecycle event with optional Twilio delivery details."""
         query = """
-            INSERT INTO otp_logs (phone_number, action, ip_address, user_agent)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO otp_logs
+                (phone_number, action, delivery_status, twilio_message_sid,
+                 error_message, ip_address, user_agent)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (phone_number, action, ip_address, user_agent))
+                await cur.execute(
+                    query,
+                    (phone_number, action, delivery_status, twilio_message_sid, error_message, ip_address, user_agent),
+                )
                 await conn.commit()

@@ -278,7 +278,7 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 | `about_me` | TEXT | Short bio |
 | `profession` | VARCHAR(100) | User's profession |
 | `interest` | ENUM | `jobs`, `startups`, or `research` |
-| `profile_completed` | BOOLEAN | Set to `true` on first profile update |
+| `profile_completed` | BOOLEAN | `true` only when email, about_me, profession, and interest are all set |
 
 ### Auth Sessions Table
 
@@ -358,7 +358,7 @@ Use **Authorize** in Swagger and paste the JWT access token (no "Bearer " prefix
 
 4. PATCH /auth/profile   (first login — complete profile)
    Body: { email, about_me, profession, interest }
-   → Profile marked as completed
+   → `profile_completed` is set to **true** only when **all four** fields are present
 ```
 
 ### Token Lifecycle
@@ -430,7 +430,7 @@ The seed script creates five OuroborosAI team members for local testing:
 
 All share password: `Admin123@`
 
-All seed users are pre-verified (`phone_verified = true`, `profile_completed = true`) so they can login immediately without OTP.
+Seed users are pre-verified (`phone_verified = true`) so they can log in without OTP. They start with `profile_completed = false` until **email**, **about_me**, **profession**, and **interest** are set via `PATCH /auth/profile` (same rule as production signups).
 
 ### Test Structure
 
@@ -443,6 +443,7 @@ tests/
 │   ├── test_password_util.py       # bcrypt hash/verify
 │   ├── test_phone_util.py          # Phone validation and masking
 │   ├── test_otp_util.py            # OTP generation and expiry
+│   ├── test_profile_completion.py  # profile_completed field rules
 │   └── test_config.py              # Configuration loading
 └── integration/
     └── (future integration tests)
@@ -525,6 +526,7 @@ ouroboros-ai-orchestrator/
 │   │   ├── password_util.py        # bcrypt hash/verify
 │   │   ├── phone_util.py           # Phone validation (E.164) and masking
 │   │   ├── otp_util.py             # OTP generation, expiry, cooldown
+│   │   ├── profile_completion.py   # When profile_completed should be true
 │   │   ├── timezone.py             # UTC normalization and ISO serialization
 │   │   ├── helpers.py              # generate_uuid, utc_now, get_current_time
 │   │   ├── utc_json_response.py    # UTC-aware JSON response class

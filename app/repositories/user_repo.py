@@ -7,6 +7,7 @@ from typing import Any, Optional
 import aiomysql
 
 from app.core.logging import get_logger
+from app.utils.profile_completion import is_profile_complete
 
 logger = get_logger(__name__)
 
@@ -150,7 +151,7 @@ class UserRepository:
                 await cur.execute("UPDATE users SET last_active = UTC_TIMESTAMP() WHERE id = %s", (user_id,))
                 await conn.commit()
 
-    async def update_profile(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    async def update_profile(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         user_id: str,
         first_name: Optional[str] = None,
@@ -178,7 +179,6 @@ class UserRepository:
         if not sets:
             return await self.get_by_id(user_id)
 
-        sets.append("profile_completed = TRUE")
         sets.append("updated_at = UTC_TIMESTAMP()")
         params.append(user_id)
 
@@ -189,7 +189,19 @@ class UserRepository:
                 await cur.execute(query, tuple(params))
                 await conn.commit()
 
-        logger.info("profile_updated", user_id=user_id)
+        row = await self.get_by_id(user_id)
+        if row is None:
+            return None
+        complete = is_profile_complete(row)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE users SET profile_completed = %s, updated_at = UTC_TIMESTAMP() WHERE id = %s",
+                    (complete, user_id),
+                )
+                await conn.commit()
+
+        logger.info("profile_updated", user_id=user_id, profile_completed=complete)
         return await self.get_by_id(user_id)
 
     async def soft_delete(self, user_id: str) -> bool:

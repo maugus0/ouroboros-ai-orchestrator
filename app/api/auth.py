@@ -1,6 +1,7 @@
 """Authentication API endpoints (phone-based JWT with Twilio OTP)."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
+from fastapi.openapi.models import Example
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.middleware.auth_middleware import get_client_info, get_current_user, get_current_user_id
@@ -23,6 +24,22 @@ from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 security = HTTPBearer(scheme_name="HTTPBearer")
+
+# Swagger merges per-field examples into one JSON blob; use explicit body examples for XOR login.
+_EXAMPLE_LOGIN_PASSWORD = "MyP@ssw0rd"  # nosec B105
+
+_LOGIN_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "phone_number": Example(
+        summary="Login with phone",
+        description="Send **phone_number** + **password** only (omit username).",
+        value={"phone_number": "+6591234567", "password": _EXAMPLE_LOGIN_PASSWORD},
+    ),
+    "username": Example(
+        summary="Login with username",
+        description="Send **username** + **password** only (omit phone_number).",
+        value={"username": "alice_wonder", "password": _EXAMPLE_LOGIN_PASSWORD},
+    ),
+}
 
 auth_service = AuthService()
 
@@ -113,7 +130,10 @@ async def resend_otp(body: ResendOTPRequest, client: dict = Depends(get_client_i
         403: {"description": "Account disabled or phone not verified"},
     },
 )
-async def login(body: LoginRequest, client: dict = Depends(get_client_info)):
+async def login(
+    body: LoginRequest = Body(..., openapi_examples=_LOGIN_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Login with **phone number** or **username** + **password**.
 
@@ -187,7 +207,7 @@ async def get_me(user_id: str = Depends(get_current_user_id)):
     response_model=UserResponse,
     summary="Update profile",
     responses={
-        200: {"description": "Profile updated, profile_completed set to true"},
+        200: {"description": "Profile updated; profile_completed true when all completion fields are set"},
         404: {"description": "User not found"},
     },
 )
@@ -198,7 +218,10 @@ async def update_profile(body: ProfileUpdateRequest, user_id: str = Depends(get_
     After first login, the client should call this to set **email**,
     **about_me**, **profession**, and **interest** (jobs / startups / research).
     Any non-null field is updated; null fields are left unchanged.
-    Sets `profile_completed = true` on first call.
+
+    ``profile_completed`` becomes **true** only when **all four** are present
+    (non-empty email, about_me, profession, and a valid interest). If the user
+    later clears required data, it becomes **false** again.
     """
     return await auth_service.update_profile(
         user_id=user_id,

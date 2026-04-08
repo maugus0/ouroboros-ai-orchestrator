@@ -1,10 +1,9 @@
--- Migration 001: Create Users, Auth Sessions, and OTP Logs tables
--- Idempotent for re-runs: every object uses CREATE TABLE IF NOT EXISTS (no INSERT/ALTER).
--- Safe to execute multiple times on the same database: existing tables are left unchanged.
--- Note: If you already have these tables from an older schema, this file does NOT alter
---       them; add a new numbered migration with ALTER TABLE for upgrades.
--- Description: Phone-based authentication with OTP verification, session tracking,
---              and profile completion flow.
+-- Migration 001: Users, auth sessions, OTP logs.
+--
+-- Idempotent: CREATE TABLE IF NOT EXISTS only — safe to re-run when tables are missing.
+--
+-- profile_completed: application sets TRUE only when email, about_me, profession, and
+-- interest are all populated (see app/utils/profile_completion.py).
 
 CREATE TABLE IF NOT EXISTS users (
     id                  VARCHAR(36)  PRIMARY KEY COMMENT 'UUID v4',
@@ -20,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     about_me            TEXT         NULL,
     profession          VARCHAR(100) NULL,
     interest            ENUM('jobs', 'startups', 'research') NULL,
-    profile_completed   BOOLEAN      DEFAULT FALSE,
+    profile_completed   BOOLEAN      DEFAULT FALSE
+        COMMENT 'TRUE when email, about_me, profession, interest are all set (app-enforced)',
 
     -- OTP fields (transient, cleared after verification)
     otp_code            VARCHAR(6)   NULL COMMENT 'Current OTP code',

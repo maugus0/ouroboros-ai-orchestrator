@@ -155,14 +155,14 @@ class TestLogin:
             "username": "alice",
             "first_name": "Alice",
             "last_name": "Smith",
-            "profile_completed": True,
+            "profile_completed": False,
         }
         auth_repo.create_session.return_value = {"session_id": "sid-1", "expires_at": datetime.now(timezone.utc)}
 
         result = await service.login(phone_number="+6591234567", password="StrongP@ss1")
 
         assert "access_token" in result
-        assert result["profile_completed"] is True
+        assert result["profile_completed"] is False
 
     @pytest.mark.asyncio
     async def test_success_with_username(self, service, repos):
@@ -180,14 +180,14 @@ class TestLogin:
             "username": "alice",
             "first_name": "Alice",
             "last_name": "Smith",
-            "profile_completed": True,
+            "profile_completed": False,
         }
         auth_repo.create_session.return_value = {"session_id": "sid-1", "expires_at": datetime.now(timezone.utc)}
 
         result = await service.login(username="alice", password="StrongP@ss1")
 
         assert "access_token" in result
-        assert result["profile_completed"] is True
+        assert result["profile_completed"] is False
         user_repo.get_by_username.assert_called_once_with("alice")
 
     @pytest.mark.asyncio

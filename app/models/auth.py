@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 PASSWORD_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#])[A-Za-z\d@$!%*?&#]{8,}$")
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
@@ -54,8 +54,20 @@ class ResendOTPRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    phone_number: Optional[str] = Field(None, examples=["+6591234567"])
-    username: Optional[str] = Field(None, examples=["alice_wonder"])
+    """Authenticate with **either** E.164 phone **or** username (not both required).
+
+    OpenAPI merges per-field ``examples`` into one sample object, which wrongly suggests
+    both identifiers must be sent. Use the route's ``openapi_examples`` for accurate samples.
+    """
+
+    phone_number: Optional[str] = Field(
+        None,
+        description="E.164 phone number. Use this **or** username, not both required.",
+    )
+    username: Optional[str] = Field(
+        None,
+        description="Username (case-insensitive match). Use this **or** phone_number.",
+    )
     password: str = Field(..., examples=["MyP@ssw0rd"])
 
     def model_post_init(self, __context: Any) -> None:  # pylint: disable=arguments-differ
@@ -91,40 +103,39 @@ class ResendOTPResponse(BaseModel):
     phone_number: str = Field(..., description="Masked phone number", examples=["+65****4567"])
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "Bearer"  # nosec B105
-    expires_in: int = Field(..., examples=[900])
-    user: Optional[dict[str, Any]] = None
-    profile_completed: Optional[bool] = Field(None, examples=[False])
-
-
-class LogoutResponse(BaseModel):
-    message: str = Field(..., examples=["Logged out successfully"])
-
-
 class UserResponse(BaseModel):
-    id: str
-    username: Optional[str] = None
-    phone_number: Optional[str] = None
-    phone_country_code: Optional[str] = None
-    phone_verified: Optional[bool] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    email: Optional[str] = None
+    id: str = Field(..., examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
+    username: Optional[str] = Field(None, examples=["alice_wonder"])
+    phone_number: Optional[str] = Field(None, examples=["+6591234567"])
+    phone_country_code: Optional[str] = Field(None, examples=["SG"])
+    phone_verified: Optional[bool] = Field(None, examples=[True])
+    first_name: Optional[str] = Field(None, examples=["Alice"])
+    last_name: Optional[str] = Field(None, examples=["Smith"])
+    email: Optional[str] = Field(None, examples=["alice@example.com"])
     about_me: Optional[str] = None
     profession: Optional[str] = None
     interest: Optional[str] = None
-    profile_completed: Optional[bool] = None
-    is_active: Optional[bool] = None
+    profile_completed: Optional[bool] = Field(None, examples=[False])
+    is_active: Optional[bool] = Field(None, examples=[True])
     last_login: Optional[datetime] = None
     last_active: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TokenResponse(BaseModel):
+    access_token: str = Field(..., examples=["eyJhbGciOiJSUzI1NiIs..."])
+    refresh_token: str = Field(..., examples=["eyJhbGciOiJSUzI1NiIs..."])
+    token_type: str = "Bearer"  # nosec B105
+    expires_in: int = Field(..., examples=[900])
+    user: Optional[UserResponse] = None
+    profile_completed: Optional[bool] = Field(None, examples=[False])
+
+
+class LogoutResponse(BaseModel):
+    message: str = Field(..., examples=["Logged out successfully"])
 
 
 class SessionResponse(BaseModel):

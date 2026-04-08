@@ -23,7 +23,7 @@ load_dotenv()
 
 SEED_USERS = [
     {
-        "username": "maugus",
+        "username": "Maugus",
         "first_name": "Ahan",
         "last_name": "Jaiswal",
         "email": "ahanjaiswal12@gmail.com",

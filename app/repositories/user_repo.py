@@ -53,8 +53,8 @@ class UserRepository:
                 return dict(row) if row else None
 
     async def get_by_username(self, username: str) -> Optional[dict[str, Any]]:
-        """Full row including password_hash (for auth logic)."""
-        query = f"SELECT {_AUTH_COLS} FROM users WHERE username = %s"  # nosec B608
+        """Full row including password_hash (case-insensitive username match)."""
+        query = f"SELECT {_AUTH_COLS} FROM users WHERE LOWER(username) = LOWER(%s)"  # nosec B608
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, (username,))
@@ -70,7 +70,10 @@ class UserRepository:
     async def username_exists(self, username: str) -> bool:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT 1 FROM users WHERE username = %s LIMIT 1", (username,))
+                await cur.execute(
+                    "SELECT 1 FROM users WHERE LOWER(username) = LOWER(%s) LIMIT 1",
+                    (username,),
+                )
                 return await cur.fetchone() is not None
 
     # ── writes ───────────────────────────────────────────────────

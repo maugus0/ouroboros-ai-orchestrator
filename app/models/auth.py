@@ -25,7 +25,7 @@ class SignupRequest(BaseModel):
     def _username(cls, v: str) -> str:
         if not USERNAME_RE.match(v):
             raise ValueError("Username must be 3-20 characters: letters, digits, underscore only")
-        return v.lower()
+        return v
 
     @field_validator("password")
     @classmethod

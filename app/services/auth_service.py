@@ -315,7 +315,7 @@ class AuthService:
             e164, _ = _parse_phone(phone_number)
             return await self.user_repo.get_by_phone(e164)
         if username:
-            return await self.user_repo.get_by_username(username.lower())
+            return await self.user_repo.get_by_username(username)
         return None
 
     async def _issue_tokens(

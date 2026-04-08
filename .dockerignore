@@ -15,5 +15,5 @@ ENV/
 htmlcov/
 *.log
 README.md
-jwt_private.pem
-jwt_public.pem
+*.pem
+*.key

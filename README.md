@@ -144,7 +144,7 @@ openssl genrsa -out jwt_private.pem 2048
 openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
 ```
 
-Then add to `.env` with newlines escaped as `\n`:
+Copy each PEM file’s full text into `.env` as a single-line value: replace real line breaks with the two characters `\` and `n` inside the double-quoted string. Then **delete** `jwt_private.pem` and `jwt_public.pem` locally — `*.pem` is gitignored so keys never land in the repo.
 
 ```
 JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
@@ -422,7 +422,7 @@ The seed script creates five OuroborosAI team members for local testing:
 
 | Username | Name | Phone | Email |
 |----------|------|-------|-------|
-| maugus | Ahan Jaiswal | +91-9818772178 | ahanjaiswal12@gmail.com |
+| Maugus | Ahan Jaiswal | +91-9818772178 | ahanjaiswal12@gmail.com |
 | NPT | Phu Truong Nguyen | +65-81234501 | phu@gmail.com |
 | Feri | Feri Setiawan | +65-81234502 | feri@gmail.com |
 | Stella | Xingyuan Liu | +65-81234503 | xingyuan@gmail.com |
@@ -487,15 +487,13 @@ Backend on port **8000**, MySQL on `DOCKER_MYSQL_PORT` (default **3307**).
 docker build -t ouroboros-orchestrator .
 
 docker run -p 8000:8000 \
+  --env-file .env \
   -e DB_HOST=mysql-host \
   -e DB_PASSWORD=secret \
-  -e JWT_PRIVATE_KEY="$(cat jwt_private.pem)" \
-  -e JWT_PUBLIC_KEY="$(cat jwt_public.pem)" \
-  -e TWILIO_ACCOUNT_SID=ACxxx \
-  -e TWILIO_AUTH_TOKEN=xxx \
-  -e TWILIO_PHONE_NUMBER=+1234567890 \
   ouroboros-orchestrator
 ```
+
+Ensure `.env` contains `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`, and Twilio variables (same escaped-PEM format as local dev). Alternatively pass `-e JWT_PRIVATE_KEY='...'` with a properly escaped single-line PEM string.
 
 ---
 

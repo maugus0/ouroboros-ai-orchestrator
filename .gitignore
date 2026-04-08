@@ -24,10 +24,11 @@ wheels/
 .installed.cfg
 *.egg
 
-# Environment
+# Environment & secrets (never commit real credentials)
 .env
 .env.local
 .env.*.local
+!.env.example
 
 # IDE
 .vscode/
@@ -54,7 +55,9 @@ logs/
 *.db
 *.sqlite3
 
-# JWT keys (generated locally)
+# Keys & certificates (prefer JWT_* in .env; never commit PEMs)
+*.pem
+*.key
 jwt_private.pem
 jwt_public.pem
 

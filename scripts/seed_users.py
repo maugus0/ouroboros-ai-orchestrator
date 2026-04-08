@@ -106,7 +106,7 @@ def ensure_user(connection, user: dict) -> str:
         """INSERT INTO users (id, username, phone_number, phone_country_code,
              phone_verified, password_hash, first_name, last_name, email,
              profile_completed, is_active)
-        VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s, FALSE, TRUE)""",
+        VALUES (%s, %s, %s, %s, FALSE, %s, %s, %s, %s, FALSE, TRUE)""",
         (
             user_id,
             user["username"],

@@ -430,8 +430,6 @@ The seed script creates five OuroborosAI team members for local testing:
 
 All share password: `Admin123@`
 
-Seed users are pre-verified (`phone_verified = true`) so they can log in without OTP. They start with `profile_completed = false` until **email**, **about_me**, **profession**, and **interest** are set via `PATCH /auth/profile` (same rule as production signups).
-
 ### Test Structure
 
 ```

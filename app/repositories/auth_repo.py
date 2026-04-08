@@ -142,18 +142,41 @@ class AuthRepository:
         delivery_status: Optional[str] = None,
         twilio_message_sid: Optional[str] = None,
         error_message: Optional[str] = None,
+        context: str = "signup",
     ) -> None:
         """Log an OTP lifecycle event with optional Twilio delivery details."""
         query = """
             INSERT INTO otp_logs
-                (phone_number, action, delivery_status, twilio_message_sid,
+                (phone_number, context, action, delivery_status, twilio_message_sid,
                  error_message, ip_address, user_agent)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     query,
-                    (phone_number, action, delivery_status, twilio_message_sid, error_message, ip_address, user_agent),
+                    (
+                        phone_number,
+                        context,
+                        action,
+                        delivery_status,
+                        twilio_message_sid,
+                        error_message,
+                        ip_address,
+                        user_agent,
+                    ),
                 )
                 await conn.commit()
+
+    async def get_otp_send_count_by_context(self, phone_number: str, context: str, window_seconds: int) -> int:
+        """Count successful OTP sends for a specific context within a time window."""
+        query = """
+            SELECT COUNT(*) AS cnt FROM otp_logs
+            WHERE phone_number = %s AND context = %s AND action = 'sent'
+              AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, (phone_number, context, window_seconds))
+                row = await cur.fetchone()
+                return row["cnt"] if row else 0

@@ -7,8 +7,12 @@ from starlette.responses import JSONResponse
 
 from app.middleware.auth_middleware import get_client_info, get_current_user, get_current_user_id
 from app.models.auth import (
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    ForgotPasswordVerifyRequest,
     LoginRequest,
     LogoutResponse,
+    MessageResponse,
     MFARequiredResponse,
     MFAToggleRequest,
     MFAToggleResponse,
@@ -17,6 +21,7 @@ from app.models.auth import (
     RefreshRequest,
     ResendOTPRequest,
     ResendOTPResponse,
+    ResetPasswordRequest,
     SessionResponse,
     SignupRequest,
     SignupResponse,
@@ -323,4 +328,88 @@ async def verify_mfa(body: VerifyMFARequest, client: dict = Depends(get_client_i
         otp_code=body.otp_code,
         ip_address=client["ip_address"],
         user_agent=client["user_agent"],
+    )
+
+
+# ── Password ─────────────────────────────────────────────────────
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    summary="Forgot password — request OTP",
+    responses={
+        200: {"description": "OTP sent to phone"},
+        403: {"description": "Phone not verified or account disabled"},
+        429: {"description": "Password was changed recently (1/week limit) or OTP rate limit"},
+    },
+)
+async def forgot_password(body: ForgotPasswordRequest, client: dict = Depends(get_client_info)):
+    """
+    Start the **forgot-password** flow.
+
+    Send an OTP to the user's verified phone number. After receiving the code,
+    call `POST /auth/forgot-password/verify` with the OTP and new password.
+
+    Limited to **once per week** — if the password was changed in the last 7 days,
+    this endpoint returns 429.
+    """
+    return await auth_service.forgot_password(
+        phone_number=body.phone_number,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/forgot-password/verify",
+    response_model=MessageResponse,
+    summary="Forgot password — verify OTP and set new password",
+    responses={
+        200: {"description": "Password updated, all sessions revoked"},
+        400: {"description": "Invalid/expired OTP or same password"},
+        429: {"description": "Too many failed attempts"},
+    },
+)
+async def verify_forgot_password(body: ForgotPasswordVerifyRequest, client: dict = Depends(get_client_info)):
+    """
+    Complete the **forgot-password** flow.
+
+    Verify the OTP and set a new password. All existing sessions are revoked
+    for security, so the user must log in again with the new password.
+    """
+    return await auth_service.verify_forgot_password(
+        user_id=body.user_id,
+        otp_code=body.otp_code,
+        new_password=body.new_password,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Reset password (authenticated)",
+    responses={
+        200: {"description": "Password updated, all sessions revoked"},
+        401: {"description": "Current password is incorrect"},
+        400: {"description": "New password same as current"},
+        429: {"description": "Password change limit (1/month)"},
+    },
+)
+async def reset_password(body: ResetPasswordRequest, user_id: str = Depends(get_current_user_id)):
+    """
+    Change password while logged in (from Settings page).
+
+    Requires the **current password** for verification. On success, all sessions
+    are revoked and the user must log in again.
+
+    Limited to **once per month** — returns 429 if the password was changed
+    in the last 30 days.
+    """
+    return await auth_service.reset_password(
+        user_id=user_id,
+        current_password=body.current_password,
+        new_password=body.new_password,
     )

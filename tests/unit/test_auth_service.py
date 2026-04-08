@@ -222,7 +222,7 @@ class TestLogin:
 class TestMFALogin:
     @pytest.mark.asyncio
     async def test_mfa_enabled_returns_challenge(self, service, repos, twilio_mock):
-        user_repo, _auth_repo = repos
+        user_repo, auth_repo = repos
         user_repo.get_by_phone.return_value = {
             "id": "uid-1",
             "username": "alice",
@@ -233,6 +233,7 @@ class TestMFALogin:
             "mfa_enabled": True,
         }
         user_repo.get_otp_send_count.return_value = 0
+        auth_repo.get_otp_send_count_by_context.return_value = 0
 
         result = await service.login(phone_number="+6591234567", password="StrongP@ss1")
 
@@ -326,6 +327,148 @@ class TestToggleMFA:
         with pytest.raises(HTTPException) as exc:
             await service.toggle_mfa("uid-1", True)
         assert exc.value.status_code == 400
+
+
+class TestForgotPassword:
+    @pytest.mark.asyncio
+    async def test_forgot_password_sends_otp(self, service, repos, twilio_mock):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_phone.return_value = {
+            "id": "uid-1",
+            "phone_number": "+6591234567",
+            "phone_verified": True,
+            "is_active": True,
+            "password_changed_at": None,
+        }
+        user_repo.get_otp_send_count.return_value = 0
+
+        result = await service.forgot_password(phone_number="+6591234567")
+
+        assert result["user_id"] == "uid-1"
+        assert "****" in result["phone_number"]
+        twilio_mock.send_otp.assert_called_once()
+        user_repo.set_otp.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_forgot_password_cooldown(self, service, repos):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_phone.return_value = {
+            "id": "uid-1",
+            "phone_number": "+6591234567",
+            "phone_verified": True,
+            "is_active": True,
+            "password_changed_at": datetime.now(timezone.utc) - timedelta(days=2),
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.forgot_password(phone_number="+6591234567")
+        assert exc.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_verify_forgot_password_success(self, service, repos):
+        user_repo, auth_repo = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "phone_number": "+6591234567",
+            "password_hash": hash_password("OldP@ss1"),
+            "otp_code": "111222",
+            "otp_expires_at": datetime.now(timezone.utc) + timedelta(minutes=3),
+            "otp_attempts": 0,
+        }
+
+        result = await service.verify_forgot_password(
+            user_id="uid-1",
+            otp_code="111222",
+            new_password="NewP@ss1",
+        )
+
+        assert "Password updated" in result["message"]
+        user_repo.update_password.assert_called_once()
+        auth_repo.revoke_all_user_sessions.assert_called_once_with("uid-1")
+
+    @pytest.mark.asyncio
+    async def test_verify_forgot_password_same_password(self, service, repos):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "phone_number": "+6591234567",
+            "password_hash": hash_password("SameP@ss1"),
+            "otp_code": "111222",
+            "otp_expires_at": datetime.now(timezone.utc) + timedelta(minutes=3),
+            "otp_attempts": 0,
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.verify_forgot_password(
+                user_id="uid-1",
+                otp_code="111222",
+                new_password="SameP@ss1",
+            )
+        assert exc.value.status_code == 400
+
+
+class TestResetPassword:
+    @pytest.mark.asyncio
+    async def test_reset_password_success(self, service, repos):
+        user_repo, auth_repo = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "password_hash": hash_password("OldP@ss1"),
+            "password_changed_at": None,
+        }
+
+        result = await service.reset_password("uid-1", "OldP@ss1", "NewP@ss1")
+
+        assert "Password updated" in result["message"]
+        user_repo.update_password.assert_called_once()
+        auth_repo.revoke_all_user_sessions.assert_called_once_with("uid-1")
+
+    @pytest.mark.asyncio
+    async def test_reset_password_wrong_current(self, service, repos):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "password_hash": hash_password("OldP@ss1"),
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.reset_password("uid-1", "WrongP@ss1", "NewP@ss1")
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_reset_password_monthly_cooldown(self, service, repos):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "password_hash": hash_password("OldP@ss1"),
+            "password_changed_at": datetime.now(timezone.utc) - timedelta(days=10),
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.reset_password("uid-1", "OldP@ss1", "NewP@ss1")
+        assert exc.value.status_code == 429
+
+
+class TestMFADailyLimit:
+    @pytest.mark.asyncio
+    async def test_mfa_daily_limit_exceeded(self, service, repos):
+        user_repo, auth_repo = repos
+        user_repo.get_by_phone.return_value = {
+            "id": "uid-1",
+            "username": "alice",
+            "phone_number": "+6591234567",
+            "phone_verified": True,
+            "password_hash": hash_password("StrongP@ss1"),
+            "is_active": True,
+            "mfa_enabled": True,
+        }
+        user_repo.get_otp_send_count.return_value = 0
+        auth_repo.get_otp_send_count_by_context.return_value = 10
+
+        with pytest.raises(HTTPException) as exc:
+            await service.login(phone_number="+6591234567", password="StrongP@ss1")
+        assert exc.value.status_code == 429
+        assert "MFA OTP limit" in exc.value.detail
 
 
 class TestLogout:

@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     OTP_COOLDOWN_SECONDS: int = 30
     OTP_RATE_LIMIT_WINDOW_SECONDS: int = 900
     OTP_RATE_LIMIT_MAX_REQUESTS: int = 3
+    MFA_OTP_DAILY_LIMIT: int = 10
+
+    # ---------- Password Reset ----------
+    FORGOT_PASSWORD_COOLDOWN_DAYS: int = 7
+    RESET_PASSWORD_COOLDOWN_DAYS: int = 30
 
     # ---------- Allowed Phone Countries (ISO 3166-1 alpha-2) ----------
     ALLOWED_COUNTRY_CODES: str = '["SG","IN","VN","ID","MY","US","CA","AU"]'

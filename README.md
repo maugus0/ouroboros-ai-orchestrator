@@ -109,7 +109,9 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 | Phone verification | Twilio OTP (6-digit, 5 min expiry, max 3 attempts) |
 | Session tracking | `auth_sessions` table with `last_active_at`, `revoked_at` for duration metrics |
 | Profile completion | First login: gender, email, about me, profession, interest (jobs/startups/research/degree) |
-| MFA (optional) | When enabled, login requires a second SMS OTP step before tokens are issued |
+| MFA (optional) | When enabled, login requires a second SMS OTP step (max 10/day) before tokens are issued |
+| Forgot password | OTP to phone → verify → new password. Limited to once per week |
+| Reset password | Authenticated change (current + new password). Limited to once per month |
 
 ---
 
@@ -244,6 +246,10 @@ curl http://localhost:8000/health
 | `OTP_COOLDOWN_SECONDS` | No | `30` | Min seconds between sends |
 | `OTP_RATE_LIMIT_MAX_REQUESTS` | No | `3` | Max OTPs per rate window |
 | `OTP_RATE_LIMIT_WINDOW_SECONDS` | No | `900` | Rate limit window (15 min) |
+| `MFA_OTP_DAILY_LIMIT` | No | `10` | Max MFA OTPs per user per day |
+| **Password Reset** ||||
+| `FORGOT_PASSWORD_COOLDOWN_DAYS` | No | `7` | Min days between forgot-password resets |
+| `RESET_PASSWORD_COOLDOWN_DAYS` | No | `30` | Min days between authenticated password changes |
 | **Application** ||||
 | `LOG_LEVEL` | No | `INFO` | Logging level |
 | `ALLOW_DB_FAILURE` | No | `false` | Skip DB on startup (tests only) |
@@ -262,7 +268,7 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 |-------|---------|
 | `users` | User accounts: phone-based auth, OTP fields, profile data (first/last name, gender, email, profession, interest) |
 | `auth_sessions` | JWT session tracking — one row per login. Tracks `last_active_at` and `revoked_at` for session duration |
-| `otp_logs` | Audit trail for OTP send/verify/fail events (rate-limiting and compliance) |
+| `otp_logs` | Audit trail for OTP events with context (signup/mfa/forgot_password) for per-flow rate limits |
 
 ### Users Table
 
@@ -283,6 +289,7 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 | `interest` | ENUM | `jobs`, `startups`, `research`, or `degree` |
 | `profile_completed` | BOOLEAN | `true` only when gender, email, about_me, profession, and interest are all set |
 | `mfa_enabled` | BOOLEAN | When `true`, login requires additional SMS OTP verification |
+| `password_changed_at` | DATETIME | Last password change (enforces cooldown limits) |
 
 ### Auth Sessions Table
 
@@ -327,6 +334,9 @@ migrations/
 | GET | `/auth/sessions` | Bearer | List active sessions (or all with `?active_only=false`) |
 | POST | `/auth/mfa/toggle` | Bearer | Enable or disable MFA for the current user |
 | POST | `/auth/mfa/verify` | Public | Verify MFA OTP to complete login (after 202 challenge) |
+| POST | `/auth/forgot-password` | Public | Request OTP for password reset (1/week limit) |
+| POST | `/auth/forgot-password/verify` | Public | Verify OTP and set new password |
+| POST | `/auth/reset-password` | Bearer | Change password with current password (1/month limit) |
 
 ### Health
 
@@ -374,12 +384,32 @@ Use **Authorize** in Swagger and paste the JWT access token (no "Bearer " prefix
 
 ### MFA (Multi-Factor Authentication)
 
-Users can enable MFA from their settings. When enabled, every login triggers an additional SMS OTP challenge:
+Users can enable MFA from their settings. When enabled, every login triggers an additional SMS OTP challenge (max **10 per day**):
 
 1. `POST /auth/mfa/toggle` — `{ "enabled": true }` (requires verified phone)
 2. On next login, the server returns `202` with `mfa_required: true`
 3. Client calls `POST /auth/mfa/verify` with the OTP to get JWT tokens
 4. `POST /auth/mfa/toggle` — `{ "enabled": false }` to disable
+
+### Forgot Password
+
+```
+1. POST /auth/forgot-password
+   Body: { phone_number }
+   → OTP sent to verified phone (limited to 1/week since last password change)
+
+2. POST /auth/forgot-password/verify
+   Body: { user_id, otp_code, new_password }
+   → Password updated, all sessions revoked, user must login again
+```
+
+### Reset Password (Authenticated)
+
+```
+POST /auth/reset-password   (requires Bearer token)
+Body: { current_password, new_password }
+→ Password updated, all sessions revoked (limited to 1/month)
+```
 
 ### Token Lifecycle
 

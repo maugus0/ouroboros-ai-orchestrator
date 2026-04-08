@@ -14,15 +14,15 @@ logger = get_logger(__name__)
 _PROFILE_COLS = """
     id, username, phone_number, phone_country_code, phone_verified,
     first_name, last_name, gender, email, about_me, profession, interest,
-    profile_completed, mfa_enabled, is_active, last_login, last_active,
-    created_at, updated_at
+    profile_completed, mfa_enabled, password_changed_at,
+    is_active, last_login, last_active, created_at, updated_at
 """
 
 _AUTH_COLS = """
     id, username, phone_number, phone_country_code, phone_verified,
     password_hash, first_name, last_name, gender, email, about_me,
-    profession, interest, profile_completed, mfa_enabled, is_active,
-    otp_code, otp_expires_at, otp_attempts, otp_last_sent_at,
+    profession, interest, profile_completed, mfa_enabled, password_changed_at,
+    is_active, otp_code, otp_expires_at, otp_attempts, otp_last_sent_at,
     last_login, last_active, created_at, updated_at
 """
 
@@ -238,6 +238,20 @@ class UserRepository:
                 await conn.commit()
         logger.info("mfa_toggled", user_id=user_id, mfa_enabled=enabled)
         return await self.get_by_id(user_id)
+
+    async def update_password(self, user_id: str, password_hash: str) -> None:
+        """Set new password hash and stamp password_changed_at."""
+        query = """
+            UPDATE users
+            SET password_hash = %s, password_changed_at = UTC_TIMESTAMP(),
+                updated_at = UTC_TIMESTAMP()
+            WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (password_hash, user_id))
+                await conn.commit()
+        logger.info("password_updated", user_id=user_id)
 
     async def soft_delete(self, user_id: str) -> bool:
         async with self.pool.acquire() as conn:

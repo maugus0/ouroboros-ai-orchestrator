@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS users (
 
     mfa_enabled         BOOLEAN      DEFAULT FALSE COMMENT 'When TRUE, login requires SMS OTP step',
 
+    password_changed_at DATETIME     NULL COMMENT 'Last password change (reset-password: 1/month, forgot: 1/week)',
+
     is_active           BOOLEAN      DEFAULT TRUE COMMENT 'Soft-delete flag',
     last_login          DATETIME     NULL COMMENT 'Last successful login',
     last_active         DATETIME     NULL COMMENT 'Last API activity',
@@ -76,6 +78,8 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 CREATE TABLE IF NOT EXISTS otp_logs (
     id                  INT          AUTO_INCREMENT PRIMARY KEY,
     phone_number        VARCHAR(20)  NOT NULL,
+    context             ENUM('signup', 'mfa', 'forgot_password') NOT NULL DEFAULT 'signup'
+        COMMENT 'Why the OTP was triggered (for per-context rate limits)',
     action              ENUM('sent', 'send_failed', 'verified', 'failed', 'expired') NOT NULL,
     delivery_status     ENUM('pending', 'sent', 'failed') NULL COMMENT 'Twilio delivery outcome (for send actions)',
     twilio_message_sid  VARCHAR(100) NULL COMMENT 'Twilio Message/Verification SID',
@@ -85,8 +89,10 @@ CREATE TABLE IF NOT EXISTS otp_logs (
     created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
 
     INDEX idx_phone_number      (phone_number),
+    INDEX idx_context            (context),
     INDEX idx_action             (action),
     INDEX idx_delivery_status    (delivery_status),
     INDEX idx_twilio_sid         (twilio_message_sid),
-    INDEX idx_created_at         (created_at)
+    INDEX idx_created_at         (created_at),
+    INDEX idx_phone_context_date (phone_number, context, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

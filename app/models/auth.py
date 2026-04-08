@@ -182,3 +182,56 @@ class VerifyMFARequest(BaseModel):
         if not v.isdigit():
             raise ValueError("OTP must be 6 digits")
         return v
+
+
+# ── Password ─────────────────────────────────────────────────────
+
+
+class ForgotPasswordRequest(BaseModel):
+    phone_number: str = Field(..., examples=["+6591234567"])
+
+
+class ForgotPasswordResponse(BaseModel):
+    user_id: str = Field(..., examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
+    phone_number: str = Field(..., description="Masked phone number", examples=["+65****4567"])
+    message: str = Field(..., examples=["OTP sent to your phone. Verify to reset password."])
+
+
+class ForgotPasswordVerifyRequest(BaseModel):
+    user_id: str = Field(..., examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
+    otp_code: str = Field(..., min_length=6, max_length=6, examples=["123456"])
+    new_password: str = Field(..., min_length=8, examples=["NewP@ssw0rd"])
+
+    @field_validator("otp_code")
+    @classmethod
+    def _otp_digits(cls, v: str) -> str:
+        if not v.isdigit():
+            raise ValueError("OTP must be 6 digits")
+        return v
+
+    @field_validator("new_password")
+    @classmethod
+    def _password(cls, v: str) -> str:
+        if not PASSWORD_RE.match(v):
+            raise ValueError(
+                "Password must be >=8 chars with uppercase, lowercase, digit, and special character (@$!%*?&#)"
+            )
+        return v
+
+
+class ResetPasswordRequest(BaseModel):
+    current_password: str = Field(..., examples=["OldP@ssw0rd"])
+    new_password: str = Field(..., min_length=8, examples=["NewP@ssw0rd"])
+
+    @field_validator("new_password")
+    @classmethod
+    def _password(cls, v: str) -> str:
+        if not PASSWORD_RE.match(v):
+            raise ValueError(
+                "Password must be >=8 chars with uppercase, lowercase, digit, and special character (@$!%*?&#)"
+            )
+        return v
+
+
+class MessageResponse(BaseModel):
+    message: str = Field(..., examples=["Password updated successfully"])

@@ -3,7 +3,7 @@
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, status
@@ -325,20 +325,34 @@ class AuthService:
         e164 = user["phone_number"]
 
         if (user.get("otp_attempts") or 0) >= settings.OTP_MAX_ATTEMPTS:
-            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent, error_message="Max attempts")
+            await self.auth_repo.log_otp_action(
+                e164,
+                "failed",
+                ip_address,
+                user_agent,
+                error_message="Max attempts",
+                context="mfa",
+            )
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Please login again.")
 
         if is_otp_expired(user.get("otp_expires_at")):
-            await self.auth_repo.log_otp_action(e164, "expired", ip_address, user_agent)
+            await self.auth_repo.log_otp_action(e164, "expired", ip_address, user_agent, context="mfa")
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP has expired. Please login again.")
 
         if not user.get("otp_code") or user["otp_code"] != otp_code:
             await self.user_repo.increment_otp_attempts(user["id"])
-            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent, error_message="Invalid code")
+            await self.auth_repo.log_otp_action(
+                e164,
+                "failed",
+                ip_address,
+                user_agent,
+                error_message="Invalid code",
+                context="mfa",
+            )
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code")
 
         await self.user_repo.clear_otp(user["id"])
-        await self.auth_repo.log_otp_action(e164, "verified", ip_address, user_agent)
+        await self.auth_repo.log_otp_action(e164, "verified", ip_address, user_agent, context="mfa")
 
         tokens = await self._issue_tokens(user, user_agent, ip_address)
         await self.user_repo.update_last_login(user["id"])
@@ -365,6 +379,138 @@ class AuthService:
         logger.info("mfa_toggled", user_id=user_id, mfa_enabled=enabled)
         return {"mfa_enabled": enabled, "message": f"MFA {action}"}
 
+    async def forgot_password(
+        self,
+        phone_number: str,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Initiate forgot-password: send OTP to verified phone. Limited to 1/week."""
+        e164, _ = _parse_phone(phone_number)
+        user = await self._get_user_by_phone_or_404(e164)
+
+        if not user.get("phone_verified"):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Phone not verified")
+        if not user.get("is_active", True):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Account is disabled")
+
+        changed_at = user.get("password_changed_at")
+        if changed_at:
+            if changed_at.tzinfo is None:
+                changed_at = changed_at.replace(tzinfo=timezone.utc)
+            cooldown = timedelta(days=settings.FORGOT_PASSWORD_COOLDOWN_DAYS)
+            if datetime.now(timezone.utc) - changed_at < cooldown:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    f"Password was changed recently. You can use forgot password once every "
+                    f"{settings.FORGOT_PASSWORD_COOLDOWN_DAYS} days.",
+                )
+
+        await self._check_otp_rate_limit(e164)
+
+        otp = generate_otp()
+        await self.user_repo.set_otp(user["id"], otp, get_otp_expiry())
+
+        sms = await self.twilio.send_otp(e164, otp)
+        await self._log_otp_send(e164, sms, ip_address, user_agent, context="forgot_password")
+
+        if not sms.success:
+            logger.error("forgot_pw_otp_send_failed", user_id=user["id"], error=sms.error_message)
+
+        logger.info("forgot_password_otp_sent", user_id=user["id"])
+        return {
+            "user_id": user["id"],
+            "phone_number": mask_phone_number(e164),
+            "message": "OTP sent to your phone. Verify to reset password.",
+        }
+
+    async def verify_forgot_password(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        user_id: str,
+        otp_code: str,
+        new_password: str,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Verify OTP and set new password (forgot-password flow)."""
+        user = await self.user_repo.get_by_id_with_otp(user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+        e164 = user["phone_number"]
+
+        if (user.get("otp_attempts") or 0) >= settings.OTP_MAX_ATTEMPTS:
+            await self.auth_repo.log_otp_action(
+                e164,
+                "failed",
+                ip_address,
+                user_agent,
+                error_message="Max attempts",
+                context="forgot_password",
+            )
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Request a new OTP.")
+
+        if is_otp_expired(user.get("otp_expires_at")):
+            await self.auth_repo.log_otp_action(e164, "expired", ip_address, user_agent, context="forgot_password")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP has expired. Please request a new one.")
+
+        if not user.get("otp_code") or user["otp_code"] != otp_code:
+            await self.user_repo.increment_otp_attempts(user["id"])
+            await self.auth_repo.log_otp_action(
+                e164,
+                "failed",
+                ip_address,
+                user_agent,
+                error_message="Invalid code",
+                context="forgot_password",
+            )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code")
+
+        if verify_password(new_password, user.get("password_hash", "")):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must be different from the current password")
+
+        await self.user_repo.clear_otp(user["id"])
+        await self.auth_repo.log_otp_action(e164, "verified", ip_address, user_agent, context="forgot_password")
+        await self.user_repo.update_password(user["id"], hash_password(new_password))
+        await self.auth_repo.revoke_all_user_sessions(user["id"])
+
+        logger.info("forgot_password_complete", user_id=user["id"])
+        return {"message": "Password updated successfully. Please login with your new password."}
+
+    async def reset_password(
+        self,
+        user_id: str,
+        current_password: str,
+        new_password: str,
+    ) -> Dict[str, str]:
+        """Authenticated password change. Limited to once per month."""
+        user = await self.user_repo.get_by_id_with_otp(user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+        if not verify_password(current_password, user.get("password_hash", "")):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
+
+        if verify_password(new_password, user.get("password_hash", "")):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must be different from the current password")
+
+        changed_at = user.get("password_changed_at")
+        if changed_at:
+            if changed_at.tzinfo is None:
+                changed_at = changed_at.replace(tzinfo=timezone.utc)
+            cooldown = timedelta(days=settings.RESET_PASSWORD_COOLDOWN_DAYS)
+            if datetime.now(timezone.utc) - changed_at < cooldown:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    f"Password can only be changed once every {settings.RESET_PASSWORD_COOLDOWN_DAYS} days.",
+                )
+
+        await self.user_repo.update_password(user["id"], hash_password(new_password))
+        await self.auth_repo.revoke_all_user_sessions(user["id"])
+
+        logger.info("reset_password_complete", user_id=user["id"])
+        return {"message": "Password updated successfully. All sessions have been revoked. Please login again."}
+
     async def get_sessions(self, user_id: str, active_only: bool = True) -> list:
         return await self.auth_repo.get_user_sessions(user_id, active_only=active_only)
 
@@ -376,12 +522,13 @@ class AuthService:
         """Send MFA OTP and return a challenge response instead of tokens."""
         e164 = user["phone_number"]
         await self._check_otp_rate_limit(e164)
+        await self._check_mfa_daily_limit(e164)
 
         otp = generate_otp()
         await self.user_repo.set_otp(user["id"], otp, get_otp_expiry())
 
         sms = await self.twilio.send_otp(e164, otp)
-        await self._log_otp_send(e164, sms, ip_address, user_agent)
+        await self._log_otp_send(e164, sms, ip_address, user_agent, context="mfa")
 
         if not sms.success:
             logger.error("mfa_otp_send_failed", user_id=user["id"], error=sms.error_message)
@@ -394,12 +541,13 @@ class AuthService:
             "message": "MFA verification required. OTP sent to your phone.",
         }
 
-    async def _log_otp_send(
+    async def _log_otp_send(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         phone: str,
         sms: SMSResult,
         ip_address: Optional[str],
         user_agent: Optional[str],
+        context: str = "signup",
     ) -> None:
         """Log OTP send attempt with actual Twilio delivery result."""
         await self.auth_repo.log_otp_action(
@@ -410,6 +558,7 @@ class AuthService:
             delivery_status="sent" if sms.success else "failed",
             twilio_message_sid=sms.message_sid,
             error_message=sms.error_message,
+            context=context,
         )
 
     async def _resolve_user(self, phone_number: Optional[str], username: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -457,6 +606,15 @@ class AuthService:
         if count >= settings.OTP_RATE_LIMIT_MAX_REQUESTS:
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many OTP requests. Please try again later.")
 
+    async def _check_mfa_daily_limit(self, e164: str) -> None:
+        """Enforce max MFA OTPs per user per day (24h rolling window)."""
+        count = await self.auth_repo.get_otp_send_count_by_context(e164, "mfa", 86400)
+        if count >= settings.MFA_OTP_DAILY_LIMIT:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                f"MFA OTP limit reached ({settings.MFA_OTP_DAILY_LIMIT}/day). Try again tomorrow.",
+            )
+
 
 # ── module-level helpers ─────────────────────────────────────────
 
@@ -476,7 +634,7 @@ def _parse_phone(raw: str):
 def _sanitize(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not user:
         return {}
-    exclude = {"password_hash", "otp_code", "otp_expires_at", "otp_attempts", "otp_last_sent_at"}
+    exclude = {"password_hash", "otp_code", "otp_expires_at", "otp_attempts", "otp_last_sent_at", "password_changed_at"}
     return {k: v for k, v in user.items() if k not in exclude}
 
 

@@ -1,107 +1,241 @@
-"""
-Authentication route handlers.
+"""Authentication API endpoints (phone-based JWT with Twilio OTP)."""
 
-Auth0 handles signup, login, and token refresh directly.
-This API provides:
-- GET /auth/me - Return authenticated user profile
-- PATCH /auth/me - Update user profile
-- POST /auth/logout - Logout endpoint (client-side token clearing)
-"""
+from fastapi import APIRouter, Depends, Query
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from fastapi import APIRouter, Depends, HTTPException, status
-
-from app.core.database import get_pool
-from app.core.logging import get_logger
-from app.middleware.auth_middleware import (
-    get_current_user,
-    get_current_user_id,
-    get_current_user_record,
+from app.middleware.auth_middleware import get_client_info, get_current_user, get_current_user_id
+from app.models.auth import (
+    LoginRequest,
+    LogoutResponse,
+    ProfileStatusResponse,
+    ProfileUpdateRequest,
+    RefreshRequest,
+    ResendOTPRequest,
+    ResendOTPResponse,
+    SessionResponse,
+    SignupRequest,
+    SignupResponse,
+    TokenResponse,
+    UserResponse,
+    VerifyOTPRequest,
 )
-from app.models.auth import LogoutResponse, UserResponse, UserUpdateRequest
-from app.repositories.user_repo import UserRepository
-
-logger = get_logger(__name__)
+from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+security = HTTPBearer(scheme_name="HTTPBearer")
+
+auth_service = AuthService()
 
 
-@router.get("/me", response_model=UserResponse)
-async def get_me(user: dict = Depends(get_current_user_record)):
+@router.post(
+    "/signup",
+    response_model=SignupResponse,
+    status_code=201,
+    summary="Register a new user",
+    responses={
+        201: {"description": "User created, OTP sent for phone verification"},
+        409: {"description": "Phone number or username already registered"},
+        429: {"description": "OTP rate limit exceeded"},
+    },
+)
+async def signup(body: SignupRequest, client: dict = Depends(get_client_info)):
     """
-    Return the authenticated user's profile.
+    Register with **phone number**, **username**, **first/last name**, and **password**.
 
-    This endpoint returns the full user record from the database,
-    including Auth0 linkage information.
+    An OTP is sent via SMS to verify the phone number.
+    After signup, call `POST /auth/verify-otp` with the code received.
     """
-    return UserResponse(
-        id=user["id"],
-        name=user["name"],
-        email=user["email"],
-        auth0_sub=user.get("auth0_sub"),
-        auth_provider=user.get("auth_provider"),
-        is_active=user["is_active"],
-        last_login=user.get("last_login"),
-        created_at=user["created_at"],
-        updated_at=user.get("updated_at"),
+    return await auth_service.signup(
+        username=body.username,
+        phone_number=body.phone_number,
+        password=body.password,
+        first_name=body.first_name,
+        last_name=body.last_name,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
     )
 
 
-@router.patch("/me", response_model=UserResponse)
-async def update_me(
-    update_data: UserUpdateRequest,
+@router.post(
+    "/verify-otp",
+    response_model=TokenResponse,
+    summary="Verify phone OTP",
+    responses={
+        200: {"description": "Phone verified, JWT tokens returned"},
+        400: {"description": "Invalid or expired OTP"},
+        429: {"description": "Too many failed attempts"},
+    },
+)
+async def verify_otp(body: VerifyOTPRequest, client: dict = Depends(get_client_info)):
+    """
+    Verify the 6-digit OTP sent to the phone number during signup.
+
+    On success, returns **access_token** and **refresh_token**.
+    The user's phone is marked as verified.
+    """
+    return await auth_service.verify_otp(
+        phone_number=body.phone_number,
+        otp_code=body.otp_code,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/resend-otp",
+    response_model=ResendOTPResponse,
+    summary="Resend OTP",
+    responses={
+        200: {"description": "New OTP sent"},
+        429: {"description": "Cooldown or rate limit active"},
+    },
+)
+async def resend_otp(body: ResendOTPRequest, client: dict = Depends(get_client_info)):
+    """
+    Resend OTP to an unverified phone number.
+
+    Rate-limited: **max 3 per 15 min**, **30 s cooldown** between sends.
+    """
+    return await auth_service.resend_otp(
+        phone_number=body.phone_number,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Login",
+    responses={
+        200: {"description": "JWT tokens returned with user profile"},
+        401: {"description": "Invalid credentials"},
+        403: {"description": "Account disabled or phone not verified"},
+    },
+)
+async def login(body: LoginRequest, client: dict = Depends(get_client_info)):
+    """
+    Login with **phone number** or **username** + **password**.
+
+    Requires the phone to be verified via OTP first.
+    The response includes a `profile_completed` flag — if `false`,
+    the client should prompt the user to complete their profile via `PATCH /auth/profile`.
+    """
+    return await auth_service.login(
+        phone_number=body.phone_number,
+        username=body.username,
+        password=body.password,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Refresh token pair",
+    responses={
+        200: {"description": "New token pair issued"},
+        401: {"description": "Invalid, expired, or revoked refresh token"},
+    },
+)
+async def refresh_tokens(body: RefreshRequest, client: dict = Depends(get_client_info)):
+    """
+    Exchange a **refresh token** for a new access + refresh token pair.
+
+    The old refresh token is rotated (invalidated). Each refresh token can only be used once.
+    """
+    result = await auth_service.refresh_tokens(
+        refresh_token=body.refresh_token,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+    return {
+        "access_token": result["access_token"],
+        "refresh_token": result["refresh_token"],
+        "token_type": result["token_type"],
+        "expires_in": result["expires_in"],
+    }
+
+
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    summary="Logout (revoke session)",
+    responses={200: {"description": "Session revoked"}},
+)
+async def logout(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    _user: dict = Depends(get_current_user),
+):
+    """Revoke the session tied to the current access token."""
+    return await auth_service.logout(credentials.credentials)
+
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current user profile",
+)
+async def get_me(user_id: str = Depends(get_current_user_id)):
+    """Return the authenticated user's full profile. Updates `last_active`."""
+    return await auth_service.get_profile(user_id)
+
+
+@router.patch(
+    "/profile",
+    response_model=UserResponse,
+    summary="Update profile",
+    responses={
+        200: {"description": "Profile updated, profile_completed set to true"},
+        404: {"description": "User not found"},
+    },
+)
+async def update_profile(body: ProfileUpdateRequest, user_id: str = Depends(get_current_user_id)):
+    """
+    Complete or update user profile.
+
+    After first login, the client should call this to set **email**,
+    **about_me**, **profession**, and **interest** (jobs / startups / research).
+    Any non-null field is updated; null fields are left unchanged.
+    Sets `profile_completed = true` on first call.
+    """
+    return await auth_service.update_profile(
+        user_id=user_id,
+        first_name=body.first_name,
+        last_name=body.last_name,
+        email=body.email,
+        about_me=body.about_me,
+        profession=body.profession,
+        interest=body.interest,
+    )
+
+
+@router.get(
+    "/profile-status",
+    response_model=ProfileStatusResponse,
+    summary="Check profile completion status",
+)
+async def profile_status(user_id: str = Depends(get_current_user_id)):
+    """Check whether the user's phone is verified and profile is completed."""
+    return await auth_service.get_profile_status(user_id)
+
+
+@router.get(
+    "/sessions",
+    response_model=list[SessionResponse],
+    summary="List user sessions",
+    responses={200: {"description": "List of active (or all) sessions for the current user"}},
+)
+async def list_sessions(
+    active_only: bool = Query(True, description="If true, only return active (non-revoked, non-expired) sessions"),
     user_id: str = Depends(get_current_user_id),
 ):
     """
-    Update the authenticated user's profile.
+    List the authenticated user's sessions.
 
-    Only name and email can be updated. Auth0 sub cannot be changed.
+    Useful for "active devices" UI or auditing login history.
+    Each session includes **created_at**, **last_active_at**, **user_agent**,
+    and **ip_address** so users can see when and where they logged in.
     """
-    pool = get_pool()
-    user_repo = UserRepository(pool)
-
-    updated_user = await user_repo.update_profile(
-        user_id,
-        name=update_data.name,
-        email=update_data.email,
-    )
-
-    if not updated_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    return UserResponse(
-        id=updated_user["id"],
-        name=updated_user["name"],
-        email=updated_user["email"],
-        auth0_sub=updated_user.get("auth0_sub"),
-        auth_provider=updated_user.get("auth_provider"),
-        is_active=updated_user["is_active"],
-        last_login=updated_user.get("last_login"),
-        created_at=updated_user["created_at"],
-        updated_at=updated_user.get("updated_at"),
-    )
-
-
-@router.post("/logout", response_model=LogoutResponse)
-async def logout(claims: dict = Depends(get_current_user)):
-    """
-    Logout the current user.
-
-    With Auth0 JWT tokens, true server-side logout requires token revocation
-    at Auth0. This endpoint confirms the token is valid and instructs the
-    client to clear stored tokens.
-
-    For full logout, the frontend should:
-    1. Call this endpoint
-    2. Clear access_token and refresh_token from storage
-    3. Optionally redirect to Auth0 logout URL for SSO logout
-    """
-    auth0_sub = claims.get("sub", "unknown")
-    logger.info("user_logout", auth0_sub=auth0_sub)
-
-    return LogoutResponse(
-        message="Logged out successfully",
-        detail="Clear tokens on client side. For SSO logout, redirect to Auth0 logout URL.",
-    )
+    return await auth_service.get_sessions(user_id, active_only=active_only)

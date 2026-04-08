@@ -1,8 +1,8 @@
-"""Data-access layer for the users table (raw SQL, aiomysql)."""
+"""Data-access layer for the users table (phone-based auth)."""
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import aiomysql
 
@@ -10,164 +10,203 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+_PROFILE_COLS = """
+    id, username, phone_number, phone_country_code, phone_verified,
+    first_name, last_name, email, about_me, profession, interest,
+    profile_completed, is_active, last_login, last_active,
+    created_at, updated_at
+"""
+
+_AUTH_COLS = """
+    id, username, phone_number, phone_country_code, phone_verified,
+    password_hash, first_name, last_name, email, about_me,
+    profession, interest, profile_completed, is_active,
+    otp_code, otp_expires_at, otp_attempts, otp_last_sent_at,
+    last_login, last_active, created_at, updated_at
+"""
+
 
 class UserRepository:
-    """
-    CRUD operations on the ``users`` table.
+    """CRUD operations on the ``users`` table for phone-based authentication."""
 
-    Supports both Auth0 users (via auth0_sub) and legacy users (password_hash).
-    All methods return dictionaries for Pydantic compatibility.
-    """
-
-    def __init__(self, pool: aiomysql.Pool):
+    def __init__(self, pool: aiomysql.Pool) -> None:
         self.pool = pool
 
-    async def get_by_id(self, user_id: str) -> dict[str, Any] | None:
-        """Get user by internal UUID (primary key)."""
-        query = """
-            SELECT id, auth0_sub, auth_provider, name, email, is_active,
-                   last_login, created_at, updated_at
-            FROM users
-            WHERE id = %s AND is_active = TRUE
-        """
+    # ── reads ────────────────────────────────────────────────────
+
+    async def get_by_id(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Safe profile read (excludes password_hash & OTP fields)."""
+        query = f"SELECT {_PROFILE_COLS} FROM users WHERE id = %s"  # nosec B608
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, (user_id,))
                 row = await cur.fetchone()
                 return dict(row) if row else None
 
-    async def get_by_auth0_sub(self, auth0_sub: str) -> dict[str, Any] | None:
-        """
-        Get user by Auth0 subject identifier.
-
-        This is the primary lookup method for Auth0-authenticated users.
-        The auth0_sub is unique per user in Auth0 (e.g., 'auth0|abc123').
-        """
-        query = """
-            SELECT id, auth0_sub, auth_provider, name, email, is_active,
-                   last_login, created_at, updated_at
-            FROM users
-            WHERE auth0_sub = %s AND is_active = TRUE
-        """
+    async def get_by_phone(self, phone_number: str) -> Optional[dict[str, Any]]:
+        """Full row including password_hash and OTP fields (for auth logic)."""
+        query = f"SELECT {_AUTH_COLS} FROM users WHERE phone_number = %s"  # nosec B608
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(query, (auth0_sub,))
+                await cur.execute(query, (phone_number,))
                 row = await cur.fetchone()
                 return dict(row) if row else None
 
-    async def get_by_email(self, email: str) -> dict[str, Any] | None:
-        """Get user by email address."""
-        query = """
-            SELECT id, auth0_sub, auth_provider, name, email, is_active,
-                   last_login, created_at, updated_at
-            FROM users
-            WHERE email = %s AND is_active = TRUE
-        """
+    async def get_by_username(self, username: str) -> Optional[dict[str, Any]]:
+        """Full row including password_hash (for auth logic)."""
+        query = f"SELECT {_AUTH_COLS} FROM users WHERE username = %s"  # nosec B608
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(query, (email,))
+                await cur.execute(query, (username,))
                 row = await cur.fetchone()
                 return dict(row) if row else None
 
-    async def create_from_auth0(
+    async def phone_exists(self, phone_number: str) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1 FROM users WHERE phone_number = %s LIMIT 1", (phone_number,))
+                return await cur.fetchone() is not None
+
+    async def username_exists(self, username: str) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1 FROM users WHERE username = %s LIMIT 1", (username,))
+                return await cur.fetchone() is not None
+
+    # ── writes ───────────────────────────────────────────────────
+
+    async def create(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
-        auth0_sub: str,
-        email: str,
-        name: str | None = None,
+        username: str,
+        phone_number: str,
+        phone_country_code: str,
+        password_hash: str,
+        first_name: str,
+        last_name: str,
     ) -> dict[str, Any]:
-        """
-        Create a new user from Auth0 token claims (JIT provisioning).
-
-        Called when a user authenticates via Auth0 for the first time.
-        Creates a local user record with a new UUID that becomes the
-        primary key for all FK relationships (chats, workflows, etc.).
-
-        Args:
-            auth0_sub: Auth0 subject identifier (e.g., 'auth0|abc123')
-            email: User's email from Auth0 token
-            name: User's name from Auth0 token (optional)
-
-        Returns:
-            The newly created user record as a dictionary
-        """
         user_id = str(uuid.uuid4())
-        display_name = name or email.split("@")[0]
-
         query = """
-            INSERT INTO users (id, auth0_sub, auth_provider, name, email, password_hash)
-            VALUES (%s, %s, 'auth0', %s, %s, NULL)
+            INSERT INTO users
+                (id, username, phone_number, phone_country_code, password_hash,
+                 first_name, last_name, phone_verified, profile_completed, is_active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, FALSE, TRUE)
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (user_id, auth0_sub, display_name, email))
+                await cur.execute(
+                    query,
+                    (user_id, username, phone_number, phone_country_code, password_hash, first_name, last_name),
+                )
                 await conn.commit()
 
-        logger.info(
-            "user_created_from_auth0",
-            user_id=user_id,
-            auth0_sub=auth0_sub,
-            email=email,
-        )
+        logger.info("user_created", user_id=user_id, username=username)
         return await self.get_by_id(user_id)
 
-    async def update_last_login(self, user_id: str) -> None:
-        """Update the last_login timestamp for a user."""
-        query = "UPDATE users SET last_login = %s WHERE id = %s"
+    async def set_otp(self, user_id: str, otp_code: str, expires_at: datetime) -> None:
+        query = """
+            UPDATE users
+            SET otp_code = %s, otp_expires_at = %s, otp_last_sent_at = UTC_TIMESTAMP(),
+                otp_attempts = 0, updated_at = UTC_TIMESTAMP()
+            WHERE id = %s
+        """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (datetime.utcnow(), user_id))
+                await cur.execute(query, (otp_code, expires_at, user_id))
                 await conn.commit()
 
-    async def update_profile(
+    async def increment_otp_attempts(self, user_id: str) -> None:
+        query = "UPDATE users SET otp_attempts = otp_attempts + 1, updated_at = UTC_TIMESTAMP() WHERE id = %s"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (user_id,))
+                await conn.commit()
+
+    async def verify_phone(self, user_id: str) -> None:
+        """Mark phone as verified and clear transient OTP columns."""
+        query = """
+            UPDATE users
+            SET phone_verified = TRUE, otp_code = NULL, otp_expires_at = NULL,
+                otp_attempts = 0, updated_at = UTC_TIMESTAMP()
+            WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (user_id,))
+                await conn.commit()
+        logger.info("phone_verified", user_id=user_id)
+
+    async def update_last_login(self, user_id: str) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE users SET last_login = UTC_TIMESTAMP() WHERE id = %s", (user_id,))
+                await conn.commit()
+
+    async def update_last_active(self, user_id: str) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE users SET last_active = UTC_TIMESTAMP() WHERE id = %s", (user_id,))
+                await conn.commit()
+
+    async def update_profile(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         user_id: str,
-        name: str | None = None,
-        email: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Update user profile fields."""
-        if name is None and email is None:
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        email: Optional[str] = None,
+        about_me: Optional[str] = None,
+        profession: Optional[str] = None,
+        interest: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        sets: list[str] = []
+        params: list[Any] = []
+
+        for col, val in [
+            ("first_name", first_name),
+            ("last_name", last_name),
+            ("email", email),
+            ("about_me", about_me),
+            ("profession", profession),
+            ("interest", interest),
+        ]:
+            if val is not None:
+                sets.append(f"{col} = %s")
+                params.append(val)
+
+        if not sets:
             return await self.get_by_id(user_id)
 
-        if name is not None and email is not None:
-            query = "UPDATE users SET name = %s, email = %s WHERE id = %s"
-            params: tuple[Any, ...] = (name, email, user_id)
-        elif name is not None:
-            query = "UPDATE users SET name = %s WHERE id = %s"
-            params = (name, user_id)
-        else:
-            query = "UPDATE users SET email = %s WHERE id = %s"
-            params = (email, user_id)
+        sets.append("profile_completed = TRUE")
+        sets.append("updated_at = UTC_TIMESTAMP()")
+        params.append(user_id)
 
+        # SET clauses are whitelisted fragments; user values are parameterized.
+        query = "UPDATE users SET " + ", ".join(sets) + " WHERE id = %s"  # nosec B608
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, params)
+                await cur.execute(query, tuple(params))
                 await conn.commit()
 
+        logger.info("profile_updated", user_id=user_id)
         return await self.get_by_id(user_id)
 
     async def soft_delete(self, user_id: str) -> bool:
-        """Soft-delete a user by setting is_active = FALSE."""
-        query = "UPDATE users SET is_active = FALSE WHERE id = %s"
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, (user_id,))
+                await cur.execute("UPDATE users SET is_active = FALSE WHERE id = %s", (user_id,))
                 await conn.commit()
                 return cur.rowcount > 0
 
-    async def link_auth0_sub(self, user_id: str, auth0_sub: str) -> dict[str, Any] | None:
-        """
-        Link an existing user to an Auth0 account.
+    # ── OTP rate-limit helper ────────────────────────────────────
 
-        Useful for migrating legacy users to Auth0.
-        """
+    async def get_otp_send_count(self, phone_number: str, window_seconds: int) -> int:
+        """Count 'sent' OTP log entries in the given window."""
         query = """
-            UPDATE users
-            SET auth0_sub = %s, auth_provider = 'auth0'
-            WHERE id = %s AND auth0_sub IS NULL
+            SELECT COUNT(*) AS cnt FROM otp_logs
+            WHERE phone_number = %s AND action = 'sent'
+              AND created_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)
         """
         async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(query, (auth0_sub, user_id))
-                await conn.commit()
-
-        return await self.get_by_id(user_id)
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, (phone_number, window_seconds))
+                row = await cur.fetchone()
+                return row["cnt"] if row else 0

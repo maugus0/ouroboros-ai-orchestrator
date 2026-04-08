@@ -1,106 +1,63 @@
-"""
-Auth0 JWT validation middleware and FastAPI dependencies.
+"""JWT authentication dependencies (self-rolled RS256)."""
 
-Validates tokens issued by Auth0 and performs JIT (Just-In-Time) user provisioning
-when a user authenticates for the first time.
-"""
+from typing import Any, Optional
 
-from typing import Any
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2AuthorizationCodeBearer
-
-from app.config import settings
-from app.core.auth0 import validate_auth0_token
-from app.core.database import get_pool
 from app.core.logging import get_logger
-from app.repositories.user_repo import UserRepository
+from app.utils.jwt_util import JWTUtil
 
 logger = get_logger(__name__)
 
-# OAuth2 scheme that integrates with Swagger UI's Auth0 flow
-oauth2_scheme = OAuth2AuthorizationCodeBearer(
-    authorizationUrl=f"https://{settings.AUTH0_DOMAIN}/authorize",
-    tokenUrl=f"https://{settings.AUTH0_DOMAIN}/oauth/token",
-    scopes={
-        "openid": "OpenID Connect",
-        "profile": "User profile",
-        "email": "Email address",
-    },
-)
+security = HTTPBearer(scheme_name="HTTPBearer")
+jwt_util = JWTUtil()
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict[str, Any]:
-    """
-    FastAPI dependency — validates Auth0 JWT from Authorization header.
+    """Validate access token and return its claims."""
+    token = credentials.credentials if credentials else None
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    Returns the decoded token claims from Auth0.
-    Use this when you need access to the full token payload.
-    """
-    claims = await validate_auth0_token(token)
+    claims = jwt_util.validate_token(token)
+    if not jwt_util.is_access_token(claims):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Access token required")
     return claims
 
 
 async def get_current_user_id(
-    token: str = Depends(oauth2_scheme),
+    user: dict[str, Any] = Depends(get_current_user),
 ) -> str:
-    """
-    FastAPI dependency — validates Auth0 JWT and returns local user UUID.
-
-    This is the primary authentication dependency for most routes.
-    It performs JIT provisioning: if the Auth0 user doesn't exist locally,
-    a new user record is created automatically.
-
-    Returns:
-        The local user UUID (users.id) for use in FK relationships.
-
-    Raises:
-        HTTPException 401 if token is invalid or missing.
-    """
-    claims = await validate_auth0_token(token)
-
-    auth0_sub = claims.get("sub")
-    if not auth0_sub:
-        logger.error("token_missing_sub")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token missing subject identifier",
-        )
-
-    pool = get_pool()
-    user_repo = UserRepository(pool)
-    user = await user_repo.get_by_auth0_sub(auth0_sub)
-
-    if not user:
-        email = claims.get("email", f"{auth0_sub}@auth0.placeholder")
-        name = claims.get("name") or claims.get("nickname")
-        user = await user_repo.create_from_auth0(auth0_sub, email, name)
-        logger.info("jit_user_provisioned", auth0_sub=auth0_sub, user_id=user["id"])
-    else:
-        await user_repo.update_last_login(user["id"])
-
-    return user["id"]
+    """Extract and return the user's UUID from token claims."""
+    uid = user.get("sub")
+    if not uid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token: missing user ID")
+    return uid
 
 
-async def get_current_user_record(
-    user_id: str = Depends(get_current_user_id),
-) -> dict[str, Any]:
-    """
-    FastAPI dependency — returns the full user record from database.
+async def get_optional_user(request: Request) -> Optional[dict[str, Any]]:
+    """Return claims if a valid Bearer token is present, else None."""
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        return None
+    try:
+        claims = jwt_util.validate_token(auth.removeprefix("Bearer "))
+        if jwt_util.is_access_token(claims):
+            return claims
+    except HTTPException:
+        pass
+    return None
 
-    Use this when you need access to user profile data (name, email, etc.)
-    beyond just the user ID.
-    """
-    pool = get_pool()
-    user_repo = UserRepository(pool)
-    user = await user_repo.get_by_id(user_id)
 
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    return user
+def get_client_info(request: Request) -> dict[str, Optional[str]]:
+    """Extract IP and User-Agent from the request (handles X-Forwarded-For)."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else None)
+    return {"ip_address": ip, "user_agent": request.headers.get("User-Agent")}

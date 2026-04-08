@@ -2,8 +2,8 @@
 --
 -- Idempotent: CREATE TABLE IF NOT EXISTS only — safe to re-run when tables are missing.
 --
--- profile_completed: application sets TRUE only when email, about_me, profession, and
--- interest are all populated (see app/utils/profile_completion.py).
+-- profile_completed: application sets TRUE only when gender, email, about_me, profession,
+-- and interest are all populated (see app/utils/profile_completion.py).
 
 CREATE TABLE IF NOT EXISTS users (
     id                  VARCHAR(36)  PRIMARY KEY COMMENT 'UUID v4',
@@ -15,18 +15,21 @@ CREATE TABLE IF NOT EXISTS users (
 
     first_name          VARCHAR(50)  NOT NULL,
     last_name           VARCHAR(50)  NOT NULL,
+    gender              ENUM('male', 'female', 'other', 'prefer_not_to_say') NULL,
     email               VARCHAR(255) NULL UNIQUE,
     about_me            TEXT         NULL,
     profession          VARCHAR(100) NULL,
     interest            ENUM('jobs', 'startups', 'research', 'degree') NULL,
     profile_completed   BOOLEAN      DEFAULT FALSE
-        COMMENT 'TRUE when email, about_me, profession, interest are all set (app-enforced)',
+        COMMENT 'TRUE when gender, email, about_me, profession, interest are all set (app-enforced)',
 
     -- OTP fields (transient, cleared after verification)
     otp_code            VARCHAR(6)   NULL COMMENT 'Current OTP code',
     otp_expires_at      DATETIME     NULL COMMENT 'OTP expiry (UTC)',
     otp_attempts        INT          DEFAULT 0 COMMENT 'Failed OTP attempts since last send',
     otp_last_sent_at    DATETIME     NULL COMMENT 'Last OTP send time (for cooldown)',
+
+    mfa_enabled         BOOLEAN      DEFAULT FALSE COMMENT 'When TRUE, login requires SMS OTP step',
 
     is_active           BOOLEAN      DEFAULT TRUE COMMENT 'Soft-delete flag',
     last_login          DATETIME     NULL COMMENT 'Last successful login',

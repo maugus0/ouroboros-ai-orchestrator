@@ -184,6 +184,9 @@ class AuthService:
         if not user.get("phone_verified"):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Phone not verified. Complete OTP verification first.")
 
+        if user.get("mfa_enabled"):
+            return await self._initiate_mfa(user, ip_address, user_agent)
+
         tokens = await self._issue_tokens(user, user_agent, ip_address)
         await self.user_repo.update_last_login(user["id"])
         profile = await self.user_repo.get_by_id(user["id"])
@@ -276,6 +279,7 @@ class AuthService:
         user_id: str,
         first_name: Optional[str] = None,
         last_name: Optional[str] = None,
+        gender: Optional[str] = None,
         email: Optional[str] = None,
         about_me: Optional[str] = None,
         profession: Optional[str] = None,
@@ -285,6 +289,7 @@ class AuthService:
             user_id,
             first_name=first_name,
             last_name=last_name,
+            gender=gender,
             email=email,
             about_me=about_me,
             profession=profession,
@@ -303,10 +308,91 @@ class AuthService:
             "phone_verified": user.get("phone_verified", False),
         }
 
+    async def verify_mfa(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        user_id: str,
+        otp_code: str,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Verify MFA OTP and issue tokens (second step of MFA login)."""
+        user = await self.user_repo.get_by_id_with_otp(user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+        if not user.get("mfa_enabled"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "MFA is not enabled for this user")
+
+        e164 = user["phone_number"]
+
+        if (user.get("otp_attempts") or 0) >= settings.OTP_MAX_ATTEMPTS:
+            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent, error_message="Max attempts")
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed attempts. Please login again.")
+
+        if is_otp_expired(user.get("otp_expires_at")):
+            await self.auth_repo.log_otp_action(e164, "expired", ip_address, user_agent)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP has expired. Please login again.")
+
+        if not user.get("otp_code") or user["otp_code"] != otp_code:
+            await self.user_repo.increment_otp_attempts(user["id"])
+            await self.auth_repo.log_otp_action(e164, "failed", ip_address, user_agent, error_message="Invalid code")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code")
+
+        await self.user_repo.clear_otp(user["id"])
+        await self.auth_repo.log_otp_action(e164, "verified", ip_address, user_agent)
+
+        tokens = await self._issue_tokens(user, user_agent, ip_address)
+        await self.user_repo.update_last_login(user["id"])
+        profile = await self.user_repo.get_by_id(user["id"])
+
+        logger.info("mfa_verified_login", user_id=user["id"])
+        return {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "token_type": "Bearer",  # nosec B105
+            "expires_in": self.jwt_util.access_ttl,
+            "user": _sanitize(profile),
+        }
+
+    async def toggle_mfa(self, user_id: str, enabled: bool) -> Dict[str, Any]:
+        user = await self.user_repo.get_by_id(user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+        if not user.get("phone_verified"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Phone must be verified before enabling MFA")
+
+        await self.user_repo.set_mfa_enabled(user_id, enabled)
+        action = "enabled" if enabled else "disabled"
+        logger.info("mfa_toggled", user_id=user_id, mfa_enabled=enabled)
+        return {"mfa_enabled": enabled, "message": f"MFA {action}"}
+
     async def get_sessions(self, user_id: str, active_only: bool = True) -> list:
         return await self.auth_repo.get_user_sessions(user_id, active_only=active_only)
 
     # ── private helpers ──────────────────────────────────────────
+
+    async def _initiate_mfa(
+        self, user: Dict[str, Any], ip_address: Optional[str], user_agent: Optional[str]
+    ) -> Dict[str, Any]:
+        """Send MFA OTP and return a challenge response instead of tokens."""
+        e164 = user["phone_number"]
+        await self._check_otp_rate_limit(e164)
+
+        otp = generate_otp()
+        await self.user_repo.set_otp(user["id"], otp, get_otp_expiry())
+
+        sms = await self.twilio.send_otp(e164, otp)
+        await self._log_otp_send(e164, sms, ip_address, user_agent)
+
+        if not sms.success:
+            logger.error("mfa_otp_send_failed", user_id=user["id"], error=sms.error_message)
+
+        logger.info("mfa_otp_sent", user_id=user["id"])
+        return {
+            "mfa_required": True,
+            "user_id": user["id"],
+            "phone_number": mask_phone_number(e164),
+            "message": "MFA verification required. OTP sent to your phone.",
+        }
 
     async def _log_otp_send(
         self,

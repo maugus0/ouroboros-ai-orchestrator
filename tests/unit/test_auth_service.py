@@ -219,6 +219,115 @@ class TestLogin:
         assert exc.value.status_code == 403
 
 
+class TestMFALogin:
+    @pytest.mark.asyncio
+    async def test_mfa_enabled_returns_challenge(self, service, repos, twilio_mock):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_phone.return_value = {
+            "id": "uid-1",
+            "username": "alice",
+            "phone_number": "+6591234567",
+            "phone_verified": True,
+            "password_hash": hash_password("StrongP@ss1"),
+            "is_active": True,
+            "mfa_enabled": True,
+        }
+        user_repo.get_otp_send_count.return_value = 0
+
+        result = await service.login(phone_number="+6591234567", password="StrongP@ss1")
+
+        assert result["mfa_required"] is True
+        assert result["user_id"] == "uid-1"
+        assert "****" in result["phone_number"]
+        twilio_mock.send_otp.assert_called_once()
+        user_repo.set_otp.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_verify_mfa_success(self, service, repos):
+        user_repo, auth_repo = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "username": "alice",
+            "phone_number": "+6591234567",
+            "phone_verified": True,
+            "mfa_enabled": True,
+            "otp_code": "654321",
+            "otp_expires_at": datetime.now(timezone.utc) + timedelta(minutes=3),
+            "otp_attempts": 0,
+        }
+        user_repo.get_by_id.return_value = {
+            "id": "uid-1",
+            "username": "alice",
+            "first_name": "Alice",
+            "last_name": "Smith",
+            "profile_completed": False,
+        }
+        auth_repo.create_session.return_value = {"session_id": "sid-1", "expires_at": datetime.now(timezone.utc)}
+
+        result = await service.verify_mfa(user_id="uid-1", otp_code="654321")
+
+        assert "access_token" in result
+        assert "refresh_token" in result
+        user_repo.clear_otp.assert_called_once_with("uid-1")
+
+    @pytest.mark.asyncio
+    async def test_verify_mfa_wrong_code(self, service, repos):
+        user_repo, _ = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "phone_number": "+6591234567",
+            "mfa_enabled": True,
+            "otp_code": "654321",
+            "otp_expires_at": datetime.now(timezone.utc) + timedelta(minutes=3),
+            "otp_attempts": 0,
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.verify_mfa(user_id="uid-1", otp_code="000000")
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_verify_mfa_not_enabled(self, service, repos):
+        user_repo, _ = repos
+        user_repo.get_by_id_with_otp.return_value = {
+            "id": "uid-1",
+            "phone_number": "+6591234567",
+            "mfa_enabled": False,
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.verify_mfa(user_id="uid-1", otp_code="654321")
+        assert exc.value.status_code == 400
+
+
+class TestToggleMFA:
+    @pytest.mark.asyncio
+    async def test_enable_mfa(self, service, repos):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_id.return_value = {
+            "id": "uid-1",
+            "phone_verified": True,
+        }
+        user_repo.set_mfa_enabled.return_value = {"id": "uid-1", "mfa_enabled": True}
+
+        result = await service.toggle_mfa("uid-1", True)
+
+        assert result["mfa_enabled"] is True
+        user_repo.set_mfa_enabled.assert_called_once_with("uid-1", True)
+
+    @pytest.mark.asyncio
+    async def test_enable_mfa_unverified_phone_400(self, service, repos):
+        user_repo, _auth_repo = repos
+        user_repo.get_by_id.return_value = {
+            "id": "uid-1",
+            "phone_verified": False,
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await service.toggle_mfa("uid-1", True)
+        assert exc.value.status_code == 400
+
+
 class TestLogout:
     @pytest.mark.asyncio
     async def test_revokes_session(self, service, repos):

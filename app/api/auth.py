@@ -3,11 +3,15 @@
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.openapi.models import Example
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.responses import JSONResponse
 
 from app.middleware.auth_middleware import get_client_info, get_current_user, get_current_user_id
 from app.models.auth import (
     LoginRequest,
     LogoutResponse,
+    MFARequiredResponse,
+    MFAToggleRequest,
+    MFAToggleResponse,
     ProfileStatusResponse,
     ProfileUpdateRequest,
     RefreshRequest,
@@ -18,6 +22,7 @@ from app.models.auth import (
     SignupResponse,
     TokenResponse,
     UserResponse,
+    VerifyMFARequest,
     VerifyOTPRequest,
 )
 from app.services.auth_service import AuthService
@@ -122,10 +127,10 @@ async def resend_otp(body: ResendOTPRequest, client: dict = Depends(get_client_i
 
 @router.post(
     "/login",
-    response_model=TokenResponse,
     summary="Login",
     responses={
-        200: {"description": "JWT tokens returned with user profile"},
+        200: {"description": "JWT tokens returned with user profile", "model": TokenResponse},
+        202: {"description": "MFA required — OTP sent to phone", "model": MFARequiredResponse},
         401: {"description": "Invalid credentials"},
         403: {"description": "Account disabled or phone not verified"},
     },
@@ -138,16 +143,24 @@ async def login(
     Login with **phone number** or **username** + **password**.
 
     Requires the phone to be verified via OTP first.
-    The nested `user` object includes `profile_completed` — if `false`, prompt the user
-    to complete their profile via `PATCH /auth/profile`.
+
+    - **If MFA is disabled:** returns `200` with JWT tokens and user profile.
+      The `user.profile_completed` flag tells the client whether to show
+      the profile-completion screen.
+    - **If MFA is enabled:** returns `202` with `mfa_required: true`,
+      `user_id`, and a masked phone number. The client must call
+      `POST /auth/mfa/verify` with the OTP to complete login.
     """
-    return await auth_service.login(
+    result = await auth_service.login(
         phone_number=body.phone_number,
         username=body.username,
         password=body.password,
         ip_address=client["ip_address"],
         user_agent=client["user_agent"],
     )
+    if result.get("mfa_required"):
+        return JSONResponse(content=result, status_code=202)
+    return result
 
 
 @router.post(
@@ -215,18 +228,19 @@ async def update_profile(body: ProfileUpdateRequest, user_id: str = Depends(get_
     """
     Complete or update user profile.
 
-    After first login, the client should call this to set **email**,
+    After first login, the client should call this to set **gender**, **email**,
     **about_me**, **profession**, and **interest** (jobs, startups, research, or degree).
     Any non-null field is updated; null fields are left unchanged.
 
-    ``profile_completed`` becomes **true** only when **all four** are present
-    (non-empty email, about_me, profession, and a valid interest). If the user
+    ``profile_completed`` becomes **true** only when **all five** are present
+    (gender, non-empty email, about_me, profession, and a valid interest). If the user
     later clears required data, it becomes **false** again.
     """
     return await auth_service.update_profile(
         user_id=user_id,
         first_name=body.first_name,
         last_name=body.last_name,
+        gender=body.gender,
         email=body.email,
         about_me=body.about_me,
         profession=body.profession,
@@ -262,3 +276,51 @@ async def list_sessions(
     and **ip_address** so users can see when and where they logged in.
     """
     return await auth_service.get_sessions(user_id, active_only=active_only)
+
+
+# ── MFA ───────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/mfa/toggle",
+    response_model=MFAToggleResponse,
+    summary="Enable or disable MFA",
+    responses={
+        200: {"description": "MFA setting updated"},
+        400: {"description": "Phone must be verified before enabling MFA"},
+    },
+)
+async def toggle_mfa(body: MFAToggleRequest, user_id: str = Depends(get_current_user_id)):
+    """
+    Toggle **multi-factor authentication** for the current user.
+
+    When enabled, every login will require an additional SMS OTP step.
+    The user's phone must be verified before MFA can be turned on.
+    """
+    return await auth_service.toggle_mfa(user_id, body.enabled)
+
+
+@router.post(
+    "/mfa/verify",
+    response_model=TokenResponse,
+    summary="Verify MFA OTP",
+    responses={
+        200: {"description": "MFA verified, JWT tokens returned"},
+        400: {"description": "Invalid or expired OTP, or MFA not enabled"},
+        429: {"description": "Too many failed attempts"},
+    },
+)
+async def verify_mfa(body: VerifyMFARequest, client: dict = Depends(get_client_info)):
+    """
+    Complete the MFA login step.
+
+    After `POST /auth/login` returns `202` with `mfa_required: true`,
+    send the 6-digit OTP received via SMS along with the `user_id`.
+    On success, returns JWT tokens and user profile (same shape as normal login).
+    """
+    return await auth_service.verify_mfa(
+        user_id=body.user_id,
+        otp_code=body.otp_code,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )

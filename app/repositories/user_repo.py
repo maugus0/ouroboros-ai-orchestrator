@@ -13,15 +13,15 @@ logger = get_logger(__name__)
 
 _PROFILE_COLS = """
     id, username, phone_number, phone_country_code, phone_verified,
-    first_name, last_name, email, about_me, profession, interest,
-    profile_completed, is_active, last_login, last_active,
+    first_name, last_name, gender, email, about_me, profession, interest,
+    profile_completed, mfa_enabled, is_active, last_login, last_active,
     created_at, updated_at
 """
 
 _AUTH_COLS = """
     id, username, phone_number, phone_country_code, phone_verified,
-    password_hash, first_name, last_name, email, about_me,
-    profession, interest, profile_completed, is_active,
+    password_hash, first_name, last_name, gender, email, about_me,
+    profession, interest, profile_completed, mfa_enabled, is_active,
     otp_code, otp_expires_at, otp_attempts, otp_last_sent_at,
     last_login, last_active, created_at, updated_at
 """
@@ -59,6 +59,15 @@ class UserRepository:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, (username,))
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def get_by_id_with_otp(self, user_id: str) -> Optional[dict[str, Any]]:
+        """Full row including OTP fields (for MFA verification)."""
+        query = f"SELECT {_AUTH_COLS} FROM users WHERE id = %s"  # nosec B608
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, (user_id,))
                 row = await cur.fetchone()
                 return dict(row) if row else None
 
@@ -125,6 +134,19 @@ class UserRepository:
                 await cur.execute(query, (user_id,))
                 await conn.commit()
 
+    async def clear_otp(self, user_id: str) -> None:
+        """Clear transient OTP columns (after successful MFA verification)."""
+        query = """
+            UPDATE users
+            SET otp_code = NULL, otp_expires_at = NULL,
+                otp_attempts = 0, updated_at = UTC_TIMESTAMP()
+            WHERE id = %s
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (user_id,))
+                await conn.commit()
+
     async def verify_phone(self, user_id: str) -> None:
         """Mark phone as verified and clear transient OTP columns."""
         query = """
@@ -156,6 +178,7 @@ class UserRepository:
         user_id: str,
         first_name: Optional[str] = None,
         last_name: Optional[str] = None,
+        gender: Optional[str] = None,
         email: Optional[str] = None,
         about_me: Optional[str] = None,
         profession: Optional[str] = None,
@@ -167,6 +190,7 @@ class UserRepository:
         for col, val in [
             ("first_name", first_name),
             ("last_name", last_name),
+            ("gender", gender),
             ("email", email),
             ("about_me", about_me),
             ("profession", profession),
@@ -202,6 +226,17 @@ class UserRepository:
                 await conn.commit()
 
         logger.info("profile_updated", user_id=user_id, profile_completed=complete)
+        return await self.get_by_id(user_id)
+
+    async def set_mfa_enabled(self, user_id: str, enabled: bool) -> Optional[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE users SET mfa_enabled = %s, updated_at = UTC_TIMESTAMP() WHERE id = %s",
+                    (enabled, user_id),
+                )
+                await conn.commit()
+        logger.info("mfa_toggled", user_id=user_id, mfa_enabled=enabled)
         return await self.get_by_id(user_id)
 
     async def soft_delete(self, user_id: str) -> bool:

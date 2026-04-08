@@ -4,57 +4,33 @@ import pytest
 
 from app.utils.profile_completion import is_profile_complete
 
+_COMPLETE = {
+    "gender": "female",
+    "email": "a@b.com",
+    "about_me": "Hi",
+    "profession": "Dev",
+    "interest": "startups",
+}
+
 
 @pytest.mark.parametrize(
     "row,expected",
     [
         (None, False),
         ({}, False),
-        (
-            {
-                "email": "a@b.com",
-                "about_me": "Hi",
-                "profession": "Dev",
-                "interest": "startups",
-            },
-            True,
-        ),
-        (
-            {
-                "email": "a@b.com",
-                "about_me": "Hi",
-                "profession": "Student",
-                "interest": "degree",
-            },
-            True,
-        ),
-        (
-            {
-                "email": "a@b.com",
-                "about_me": "Hi",
-                "profession": "Dev",
-                "interest": None,
-            },
-            False,
-        ),
-        (
-            {
-                "email": "  ",
-                "about_me": "Hi",
-                "profession": "Dev",
-                "interest": "jobs",
-            },
-            False,
-        ),
-        (
-            {
-                "email": "a@b.com",
-                "about_me": "",
-                "profession": "Dev",
-                "interest": "research",
-            },
-            False,
-        ),
+        (_COMPLETE, True),
+        ({**_COMPLETE, "interest": "degree"}, True),
+        ({**_COMPLETE, "interest": "jobs"}, True),
+        ({**_COMPLETE, "interest": "research"}, True),
+        ({**_COMPLETE, "gender": "male"}, True),
+        ({**_COMPLETE, "gender": "other"}, True),
+        ({**_COMPLETE, "gender": "prefer_not_to_say"}, True),
+        ({**_COMPLETE, "gender": None}, False),
+        ({**_COMPLETE, "gender": "invalid"}, False),
+        ({**_COMPLETE, "email": "  "}, False),
+        ({**_COMPLETE, "about_me": ""}, False),
+        ({**_COMPLETE, "profession": ""}, False),
+        ({**_COMPLETE, "interest": None}, False),
     ],
 )
 def test_is_profile_complete(row, expected):

@@ -31,7 +31,7 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 1. **Authenticates users** via self-rolled JWT (RS256) with phone-based registration
 2. **Verifies phone numbers** using Twilio OTP (SMS or Verify API)
 3. **Supports login** by phone number or username + password
-4. **Manages user profiles** with a completion flow (email, profession, interest)
+4. **Manages user profiles** with a completion flow (gender, email, about me, profession, interest)
 5. **Tracks sessions** with active-device visibility and duration metrics
 6. **Exposes a health endpoint** for monitoring and readiness checks
 
@@ -67,6 +67,7 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 │  │  GET  /auth/me, /auth/profile-status        │     │
 │  │  PATCH /auth/profile                        │     │
 │  │  GET  /auth/sessions                        │     │
+│  │  POST /auth/mfa/toggle, /auth/mfa/verify   │     │
 │  │  GET  / and /health                         │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
@@ -107,7 +108,8 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 | Refresh token | 7 day TTL, SHA-256 hashed in DB, rotation on use |
 | Phone verification | Twilio OTP (6-digit, 5 min expiry, max 3 attempts) |
 | Session tracking | `auth_sessions` table with `last_active_at`, `revoked_at` for duration metrics |
-| Profile completion | First login: email, about me, profession, interest (jobs/startups/research/degree) |
+| Profile completion | First login: gender, email, about me, profession, interest (jobs/startups/research/degree) |
+| MFA (optional) | When enabled, login requires a second SMS OTP step before tokens are issued |
 
 ---
 
@@ -258,7 +260,7 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 
 | Table | Purpose |
 |-------|---------|
-| `users` | User accounts: phone-based auth, OTP fields, profile data (first/last name, email, profession, interest) |
+| `users` | User accounts: phone-based auth, OTP fields, profile data (first/last name, gender, email, profession, interest) |
 | `auth_sessions` | JWT session tracking — one row per login. Tracks `last_active_at` and `revoked_at` for session duration |
 | `otp_logs` | Audit trail for OTP send/verify/fail events (rate-limiting and compliance) |
 
@@ -275,10 +277,12 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 | `first_name` | VARCHAR(50) | Required on signup |
 | `last_name` | VARCHAR(50) | Required on signup |
 | `email` | VARCHAR(255) | Optional, set during profile completion |
+| `gender` | ENUM | `male`, `female`, `other`, or `prefer_not_to_say` |
 | `about_me` | TEXT | Short bio |
 | `profession` | VARCHAR(100) | User's profession |
 | `interest` | ENUM | `jobs`, `startups`, `research`, or `degree` |
-| `profile_completed` | BOOLEAN | `true` only when email, about_me, profession, and interest are all set |
+| `profile_completed` | BOOLEAN | `true` only when gender, email, about_me, profession, and interest are all set |
+| `mfa_enabled` | BOOLEAN | When `true`, login requires additional SMS OTP verification |
 
 ### Auth Sessions Table
 
@@ -314,13 +318,15 @@ migrations/
 | POST | `/auth/signup` | Public | Register with phone, username, first/last name + password; sends OTP |
 | POST | `/auth/verify-otp` | Public | Verify OTP; returns JWT tokens |
 | POST | `/auth/resend-otp` | Public | Resend OTP (rate-limited) |
-| POST | `/auth/login` | Public | Phone number **or** username + password login |
+| POST | `/auth/login` | Public | Phone or username + password; returns tokens (200) or MFA challenge (202) |
 | POST | `/auth/refresh` | Public | Rotate refresh token → new token pair |
 | POST | `/auth/logout` | Bearer | Revoke current session |
 | GET | `/auth/me` | Bearer | Current user profile |
-| PATCH | `/auth/profile` | Bearer | Update profile (email, about me, profession, interest) |
+| PATCH | `/auth/profile` | Bearer | Update profile (gender, email, about me, profession, interest) |
 | GET | `/auth/profile-status` | Bearer | Check profile/phone verification status |
 | GET | `/auth/sessions` | Bearer | List active sessions (or all with `?active_only=false`) |
+| POST | `/auth/mfa/toggle` | Bearer | Enable or disable MFA for the current user |
+| POST | `/auth/mfa/verify` | Public | Verify MFA OTP to complete login (after 202 challenge) |
 
 ### Health
 
@@ -354,12 +360,26 @@ Use **Authorize** in Swagger and paste the JWT access token (no "Bearer " prefix
 
 3. POST /auth/login
    Body: { phone_number, password }  OR  { username, password }
-   → JWT tokens returned; use `user.profile_completed` to drive profile-completion UI
+   → 200: JWT tokens returned (MFA off)
+   → 202: { mfa_required: true, user_id, phone_number } (MFA on)
+
+3b. POST /auth/mfa/verify   (only when login returns 202)
+    Body: { user_id, otp_code }
+    → JWT tokens returned after OTP verification
 
 4. PATCH /auth/profile   (first login — complete profile)
-   Body: { email, about_me, profession, interest }
-   → `profile_completed` is set to **true** only when **all four** fields are present
+   Body: { gender, email, about_me, profession, interest }
+   → `profile_completed` is set to **true** only when **all five** fields are present
 ```
+
+### MFA (Multi-Factor Authentication)
+
+Users can enable MFA from their settings. When enabled, every login triggers an additional SMS OTP challenge:
+
+1. `POST /auth/mfa/toggle` — `{ "enabled": true }` (requires verified phone)
+2. On next login, the server returns `202` with `mfa_required: true`
+3. Client calls `POST /auth/mfa/verify` with the OTP to get JWT tokens
+4. `POST /auth/mfa/toggle` — `{ "enabled": false }` to disable
 
 ### Token Lifecycle
 
@@ -436,7 +456,7 @@ All share password: `Admin123@`
 tests/
 ├── conftest.py                     # RSA key generation, shared fixtures
 ├── unit/
-│   ├── test_auth_service.py        # Signup, OTP, login (phone + username), logout (mocked)
+│   ├── test_auth_service.py        # Signup, OTP, login, MFA, logout (mocked)
 │   ├── test_jwt_util.py            # Token generation and validation
 │   ├── test_password_util.py       # bcrypt hash/verify
 │   ├── test_phone_util.py          # Phone validation and masking

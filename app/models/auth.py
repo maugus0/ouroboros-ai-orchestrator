@@ -82,6 +82,7 @@ class RefreshRequest(BaseModel):
 class ProfileUpdateRequest(BaseModel):
     first_name: Optional[str] = Field(None, min_length=1, max_length=50, examples=["Alice"])
     last_name: Optional[str] = Field(None, min_length=1, max_length=50, examples=["Smith"])
+    gender: Optional[str] = Field(None, pattern=r"^(male|female|other|prefer_not_to_say)$", examples=["female"])
     email: Optional[EmailStr] = Field(None, examples=["alice@example.com"])
     about_me: Optional[str] = Field(None, max_length=500, examples=["Full-stack dev passionate about AI"])
     profession: Optional[str] = Field(None, max_length=100, examples=["Software Engineer"])
@@ -111,11 +112,13 @@ class UserResponse(BaseModel):
     phone_verified: Optional[bool] = Field(None, examples=[True])
     first_name: Optional[str] = Field(None, examples=["Alice"])
     last_name: Optional[str] = Field(None, examples=["Smith"])
+    gender: Optional[str] = Field(None, examples=["female"])
     email: Optional[str] = Field(None, examples=["alice@example.com"])
     about_me: Optional[str] = None
     profession: Optional[str] = None
     interest: Optional[str] = None
     profile_completed: Optional[bool] = Field(None, examples=[False])
+    mfa_enabled: Optional[bool] = Field(None, examples=[False])
     is_active: Optional[bool] = Field(None, examples=[True])
     last_login: Optional[datetime] = None
     last_active: Optional[datetime] = None
@@ -151,3 +154,31 @@ class SessionResponse(BaseModel):
 class ProfileStatusResponse(BaseModel):
     profile_completed: bool
     phone_verified: bool
+
+
+class MFAToggleRequest(BaseModel):
+    enabled: bool = Field(..., examples=[True])
+
+
+class MFAToggleResponse(BaseModel):
+    mfa_enabled: bool = Field(..., examples=[True])
+    message: str = Field(..., examples=["MFA enabled"])
+
+
+class MFARequiredResponse(BaseModel):
+    mfa_required: bool = Field(True, examples=[True])
+    user_id: str = Field(..., examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
+    phone_number: str = Field(..., description="Masked phone number", examples=["+65****4567"])
+    message: str = Field(..., examples=["MFA verification required. OTP sent to your phone."])
+
+
+class VerifyMFARequest(BaseModel):
+    user_id: str = Field(..., examples=["a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
+    otp_code: str = Field(..., min_length=6, max_length=6, examples=["123456"])
+
+    @field_validator("otp_code")
+    @classmethod
+    def _otp_digits(cls, v: str) -> str:
+        if not v.isdigit():
+            raise ValueError("OTP must be 6 digits")
+        return v

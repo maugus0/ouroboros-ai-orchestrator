@@ -138,8 +138,8 @@ async def login(
     Login with **phone number** or **username** + **password**.
 
     Requires the phone to be verified via OTP first.
-    The response includes a `profile_completed` flag — if `false`,
-    the client should prompt the user to complete their profile via `PATCH /auth/profile`.
+    The nested `user` object includes `profile_completed` — if `false`, prompt the user
+    to complete their profile via `PATCH /auth/profile`.
     """
     return await auth_service.login(
         phone_number=body.phone_number,

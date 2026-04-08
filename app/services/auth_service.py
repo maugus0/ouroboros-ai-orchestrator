@@ -195,7 +195,6 @@ class AuthService:
             "token_type": "Bearer",  # nosec B105
             "expires_in": self.jwt_util.access_ttl,
             "user": _sanitize(profile),
-            "profile_completed": profile.get("profile_completed", False),
         }
 
     async def refresh_tokens(  # pylint: disable=too-many-locals

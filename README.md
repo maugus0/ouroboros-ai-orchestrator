@@ -354,7 +354,7 @@ Use **Authorize** in Swagger and paste the JWT access token (no "Bearer " prefix
 
 3. POST /auth/login
    Body: { phone_number, password }  OR  { username, password }
-   → JWT tokens returned, response includes profile_completed flag
+   → JWT tokens returned; use `user.profile_completed` to drive profile-completion UI
 
 4. PATCH /auth/profile   (first login — complete profile)
    Body: { email, about_me, profession, interest }

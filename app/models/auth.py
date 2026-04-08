@@ -131,7 +131,6 @@ class TokenResponse(BaseModel):
     token_type: str = "Bearer"  # nosec B105
     expires_in: int = Field(..., examples=[900])
     user: Optional[UserResponse] = None
-    profile_completed: Optional[bool] = Field(None, examples=[False])
 
 
 class LogoutResponse(BaseModel):

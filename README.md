@@ -347,7 +347,7 @@ migrations/
 
 ### API Documentation
 
-- **Swagger UI**: http://localhost:8000/docs — All endpoints with request/response examples
+- **Swagger UI**: http://localhost:8000/docs — All `/auth` routes include **named request examples** (e.g. phone-only vs username-only login, profile completion, MFA, password flows) plus documented status codes (including SMS failures and rate limits).
 - **ReDoc**: http://localhost:8000/redoc
 - **OpenAPI JSON**: http://localhost:8000/openapi.json
 
@@ -634,7 +634,10 @@ The orchestrator uses async I/O (`aiomysql`), which means infrastructure like th
 | **404** | `{"detail": "User not found"}` |
 | **409** | `{"detail": "Phone number already registered"}` |
 | **422** | Pydantic validation errors |
-| **429** | `{"detail": "Too many OTP requests. Please try again later."}` |
+| **429** | `{"detail": "Too many OTP requests. Please try again later."}` (also MFA daily limit, password cooldowns) |
+| **500** | `{"detail": "Failed to send OTP. Please try again."}` when Twilio SMS fails (signup, resend, forgot-password, MFA login challenge) |
+
+**Note:** If signup returns **500** after Twilio fails, the user row may already exist; use **resend-otp** once SMS is working, or remove the row and sign up again during development.
 
 ---
 

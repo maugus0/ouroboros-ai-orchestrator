@@ -37,6 +37,9 @@ security = HTTPBearer(scheme_name="HTTPBearer")
 
 # Swagger merges per-field examples into one JSON blob; use explicit body examples for XOR login.
 _EXAMPLE_LOGIN_PASSWORD = "MyP@ssw0rd"  # nosec B105
+_EXAMPLE_OPENAPI_PASSWORD = "MyP@ssw0rd"  # nosec B105 — OpenAPI sample only
+_EXAMPLE_OPENAPI_NEW_PASSWORD = "NewP@ssw0rd"  # nosec B105 — OpenAPI sample only
+_EXAMPLE_REFRESH_TOKEN_PLACEHOLDER = "<paste_refresh_token_from_login_response>"  # nosec B105
 
 _LOGIN_OPENAPI_EXAMPLES: dict[str, Example] = {
     "phone_number": Example(
@@ -51,6 +54,107 @@ _LOGIN_OPENAPI_EXAMPLES: dict[str, Example] = {
     ),
 }
 
+_SIGNUP_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "register": Example(
+        summary="Typical signup",
+        description="E.164 phone in an allowed country; password needs upper, lower, digit, special.",
+        value={
+            "username": "alice_wonder",
+            "phone_number": "+6591234567",
+            "password": _EXAMPLE_OPENAPI_PASSWORD,
+            "first_name": "Alice",
+            "last_name": "Smith",
+        },
+    ),
+}
+
+_VERIFY_OTP_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "verify": Example(
+        summary="Verify 6-digit code",
+        value={"phone_number": "+6591234567", "otp_code": "123456"},
+    ),
+}
+
+_RESEND_OTP_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "resend": Example(
+        summary="Resend to same phone",
+        value={"phone_number": "+6591234567"},
+    ),
+}
+
+_REFRESH_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "rotate": Example(
+        summary="Exchange refresh token",
+        value={"refresh_token": _EXAMPLE_REFRESH_TOKEN_PLACEHOLDER},
+    ),
+}
+
+_PROFILE_PATCH_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "complete_profile": Example(
+        summary="Complete profile (all completion fields)",
+        description="Sets gender, email, about_me, profession, interest so `profile_completed` becomes true.",
+        value={
+            "gender": "female",
+            "email": "alice@example.com",
+            "about_me": "Full-stack developer interested in AI scholarships.",
+            "profession": "Software Engineer",
+            "interest": "degree",
+        },
+    ),
+    "partial_update": Example(
+        summary="Partial update",
+        description="Only sent fields are updated; null/omitted fields stay unchanged.",
+        value={"profession": "Researcher", "interest": "research"},
+    ),
+}
+
+_MFA_TOGGLE_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "enable": Example(
+        summary="Enable MFA",
+        value={"enabled": True},
+    ),
+    "disable": Example(
+        summary="Disable MFA",
+        value={"enabled": False},
+    ),
+}
+
+_VERIFY_MFA_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "after_login_202": Example(
+        summary="After login returned 202",
+        description="Use `user_id` from the MFA challenge response.",
+        value={"user_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "otp_code": "123456"},
+    ),
+}
+
+_FORGOT_PASSWORD_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "request_reset": Example(
+        summary="Request OTP",
+        value={"phone_number": "+6591234567"},
+    ),
+}
+
+_FORGOT_PASSWORD_VERIFY_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "set_new_password": Example(
+        summary="Verify OTP and new password",
+        value={
+            "user_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "otp_code": "123456",
+            "new_password": _EXAMPLE_OPENAPI_NEW_PASSWORD,
+        },
+    ),
+}
+
+_RESET_PASSWORD_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "change_while_logged_in": Example(
+        summary="Settings password change",
+        value={
+            "current_password": _EXAMPLE_OPENAPI_PASSWORD,
+            "new_password": _EXAMPLE_OPENAPI_NEW_PASSWORD,
+        },
+    ),
+}
+
 auth_service = AuthService()
 
 
@@ -62,10 +166,15 @@ auth_service = AuthService()
     responses={
         201: {"description": "User created, OTP sent for phone verification"},
         409: {"description": "Phone number or username already registered"},
+        422: {"description": "Validation error (username format, password policy, etc.)"},
         429: {"description": "OTP rate limit exceeded"},
+        500: {"description": "SMS delivery failed (Twilio); account may exist — fix config or use resend-otp"},
     },
 )
-async def signup(body: SignupRequest, client: dict = Depends(get_client_info)):
+async def signup(
+    body: SignupRequest = Body(..., openapi_examples=_SIGNUP_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Register with **phone number**, **username**, **first/last name**, and **password**.
 
@@ -90,10 +199,14 @@ async def signup(body: SignupRequest, client: dict = Depends(get_client_info)):
     responses={
         200: {"description": "Phone verified, JWT tokens returned"},
         400: {"description": "Invalid or expired OTP"},
+        422: {"description": "Validation error"},
         429: {"description": "Too many failed attempts"},
     },
 )
-async def verify_otp(body: VerifyOTPRequest, client: dict = Depends(get_client_info)):
+async def verify_otp(
+    body: VerifyOTPRequest = Body(..., openapi_examples=_VERIFY_OTP_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Verify the 6-digit OTP sent to the phone number during signup.
 
@@ -114,10 +227,16 @@ async def verify_otp(body: VerifyOTPRequest, client: dict = Depends(get_client_i
     summary="Resend OTP",
     responses={
         200: {"description": "New OTP sent"},
+        404: {"description": "No user with this phone number"},
+        422: {"description": "Validation error"},
         429: {"description": "Cooldown or rate limit active"},
+        500: {"description": "SMS delivery failed (Twilio)"},
     },
 )
-async def resend_otp(body: ResendOTPRequest, client: dict = Depends(get_client_info)):
+async def resend_otp(
+    body: ResendOTPRequest = Body(..., openapi_examples=_RESEND_OTP_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Resend OTP to an unverified phone number.
 
@@ -138,6 +257,9 @@ async def resend_otp(body: ResendOTPRequest, client: dict = Depends(get_client_i
         202: {"description": "MFA required — OTP sent to phone", "model": MFARequiredResponse},
         401: {"description": "Invalid credentials"},
         403: {"description": "Account disabled or phone not verified"},
+        422: {"description": "Validation error (e.g. missing phone and username)"},
+        429: {"description": "MFA OTP daily limit reached (when MFA enabled)"},
+        500: {"description": "MFA SMS delivery failed (when MFA enabled)"},
     },
 )
 async def login(
@@ -174,10 +296,14 @@ async def login(
     summary="Refresh token pair",
     responses={
         200: {"description": "New token pair issued"},
-        401: {"description": "Invalid, expired, or revoked refresh token"},
+        401: {"description": "Invalid, expired, revoked refresh token, or concurrent session revoke"},
+        422: {"description": "Validation error"},
     },
 )
-async def refresh_tokens(body: RefreshRequest, client: dict = Depends(get_client_info)):
+async def refresh_tokens(
+    body: RefreshRequest = Body(..., openapi_examples=_REFRESH_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Exchange a **refresh token** for a new access + refresh token pair.
 
@@ -200,7 +326,10 @@ async def refresh_tokens(body: RefreshRequest, client: dict = Depends(get_client
     "/logout",
     response_model=LogoutResponse,
     summary="Logout (revoke session)",
-    responses={200: {"description": "Session revoked"}},
+    responses={
+        200: {"description": "Session revoked"},
+        401: {"description": "Missing or invalid Bearer token"},
+    },
 )
 async def logout(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -214,6 +343,10 @@ async def logout(
     "/me",
     response_model=UserResponse,
     summary="Get current user profile",
+    responses={
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
+    },
 )
 async def get_me(user_id: str = Depends(get_current_user_id)):
     """Return the authenticated user's full profile. Updates `last_active`."""
@@ -226,10 +359,15 @@ async def get_me(user_id: str = Depends(get_current_user_id)):
     summary="Update profile",
     responses={
         200: {"description": "Profile updated; profile_completed true when all completion fields are set"},
+        401: {"description": "Missing or invalid Bearer token"},
         404: {"description": "User not found"},
+        422: {"description": "Validation error (e.g. invalid gender or interest enum)"},
     },
 )
-async def update_profile(body: ProfileUpdateRequest, user_id: str = Depends(get_current_user_id)):
+async def update_profile(
+    body: ProfileUpdateRequest = Body(..., openapi_examples=_PROFILE_PATCH_OPENAPI_EXAMPLES),
+    user_id: str = Depends(get_current_user_id),
+):
     """
     Complete or update user profile.
 
@@ -257,6 +395,10 @@ async def update_profile(body: ProfileUpdateRequest, user_id: str = Depends(get_
     "/profile-status",
     response_model=ProfileStatusResponse,
     summary="Check profile completion status",
+    responses={
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
+    },
 )
 async def profile_status(user_id: str = Depends(get_current_user_id)):
     """Check whether the user's phone is verified and profile is completed."""
@@ -267,7 +409,10 @@ async def profile_status(user_id: str = Depends(get_current_user_id)):
     "/sessions",
     response_model=list[SessionResponse],
     summary="List user sessions",
-    responses={200: {"description": "List of active (or all) sessions for the current user"}},
+    responses={
+        200: {"description": "List of active (or all) sessions for the current user"},
+        401: {"description": "Missing or invalid Bearer token"},
+    },
 )
 async def list_sessions(
     active_only: bool = Query(True, description="If true, only return active (non-revoked, non-expired) sessions"),
@@ -293,9 +438,14 @@ async def list_sessions(
     responses={
         200: {"description": "MFA setting updated"},
         400: {"description": "Phone must be verified before enabling MFA"},
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
     },
 )
-async def toggle_mfa(body: MFAToggleRequest, user_id: str = Depends(get_current_user_id)):
+async def toggle_mfa(
+    body: MFAToggleRequest = Body(..., openapi_examples=_MFA_TOGGLE_OPENAPI_EXAMPLES),
+    user_id: str = Depends(get_current_user_id),
+):
     """
     Toggle **multi-factor authentication** for the current user.
 
@@ -312,10 +462,15 @@ async def toggle_mfa(body: MFAToggleRequest, user_id: str = Depends(get_current_
     responses={
         200: {"description": "MFA verified, JWT tokens returned"},
         400: {"description": "Invalid or expired OTP, or MFA not enabled"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error"},
         429: {"description": "Too many failed attempts"},
     },
 )
-async def verify_mfa(body: VerifyMFARequest, client: dict = Depends(get_client_info)):
+async def verify_mfa(
+    body: VerifyMFARequest = Body(..., openapi_examples=_VERIFY_MFA_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Complete the MFA login step.
 
@@ -341,10 +496,16 @@ async def verify_mfa(body: VerifyMFARequest, client: dict = Depends(get_client_i
     responses={
         200: {"description": "OTP sent to phone"},
         403: {"description": "Phone not verified or account disabled"},
+        404: {"description": "No user with this phone number"},
+        422: {"description": "Validation error"},
         429: {"description": "Password was changed recently (1/week limit) or OTP rate limit"},
+        500: {"description": "SMS delivery failed (Twilio); stored OTP cleared"},
     },
 )
-async def forgot_password(body: ForgotPasswordRequest, client: dict = Depends(get_client_info)):
+async def forgot_password(
+    body: ForgotPasswordRequest = Body(..., openapi_examples=_FORGOT_PASSWORD_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Start the **forgot-password** flow.
 
@@ -368,10 +529,15 @@ async def forgot_password(body: ForgotPasswordRequest, client: dict = Depends(ge
     responses={
         200: {"description": "Password updated, all sessions revoked"},
         400: {"description": "Invalid/expired OTP or same password"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error"},
         429: {"description": "Too many failed attempts"},
     },
 )
-async def verify_forgot_password(body: ForgotPasswordVerifyRequest, client: dict = Depends(get_client_info)):
+async def verify_forgot_password(
+    body: ForgotPasswordVerifyRequest = Body(..., openapi_examples=_FORGOT_PASSWORD_VERIFY_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
     """
     Complete the **forgot-password** flow.
 
@@ -393,12 +559,17 @@ async def verify_forgot_password(body: ForgotPasswordVerifyRequest, client: dict
     summary="Reset password (authenticated)",
     responses={
         200: {"description": "Password updated, all sessions revoked"},
-        401: {"description": "Current password is incorrect"},
         400: {"description": "New password same as current"},
+        401: {"description": "Current password is incorrect or missing Bearer token"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error (password policy)"},
         429: {"description": "Password change limit (1/month)"},
     },
 )
-async def reset_password(body: ResetPasswordRequest, user_id: str = Depends(get_current_user_id)):
+async def reset_password(
+    body: ResetPasswordRequest = Body(..., openapi_examples=_RESET_PASSWORD_OPENAPI_EXAMPLES),
+    user_id: str = Depends(get_current_user_id),
+):
     """
     Change password while logged in (from Settings page).
 

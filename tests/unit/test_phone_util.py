@@ -34,6 +34,10 @@ class TestMaskPhoneNumber:
     def test_masks_middle_digits(self):
         assert mask_phone_number("+6591234567") == "+65****4567"
 
+    def test_masks_us_one_digit_country_code(self):
+        """Country code +1 must not leak an extra subscriber digit in the prefix."""
+        assert mask_phone_number("+12025551234") == "+1******1234"
+
     def test_short_number(self):
         assert mask_phone_number("+123") == "****"
 

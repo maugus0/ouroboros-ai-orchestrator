@@ -1,7 +1,7 @@
 """Health-check endpoints."""
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import APP_VERSION
 from app.core.database import get_pool
@@ -10,17 +10,21 @@ from app.core.database import get_pool
 class HealthResponse(BaseModel):
     """Health check response model."""
 
-    status: str
-    version: str
-    database: str
+    status: str = Field(..., examples=["healthy"], description="Overall service status when DB is up")
+    version: str = Field(..., examples=[APP_VERSION], description="Application version from config")
+    database: str = Field(
+        ...,
+        examples=["connected"],
+        description="`connected` | `not_connected` (no pool) | `error` (probe failed)",
+    )
 
 
 class RootResponse(BaseModel):
     """Root endpoint response model."""
 
-    message: str
-    version: str
-    status: str
+    message: str = Field(..., examples=["Ouroboros Orchestrator Service"])
+    version: str = Field(..., examples=[APP_VERSION])
+    status: str = Field(..., examples=["healthy"])
 
 
 router = APIRouter(tags=["Health"])

@@ -141,10 +141,10 @@ class LogoutResponse(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    id: str
-    user_agent: Optional[str] = None
-    ip_address: Optional[str] = None
-    is_revoked: Optional[bool] = None
+    id: str = Field(..., examples=["4337d715-f183-472c-8107-f802a1f1fc20"])
+    user_agent: Optional[str] = Field(None, examples=["Mozilla/5.0 (Macintosh; Intel Mac OS X)"])
+    ip_address: Optional[str] = Field(None, examples=["203.0.113.10"])
+    is_revoked: Optional[bool] = Field(None, examples=[False])
     revoked_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     last_active_at: Optional[datetime] = None
@@ -152,8 +152,8 @@ class SessionResponse(BaseModel):
 
 
 class ProfileStatusResponse(BaseModel):
-    profile_completed: bool
-    phone_verified: bool
+    profile_completed: bool = Field(..., examples=[False])
+    phone_verified: bool = Field(..., examples=[True])
 
 
 class MFAToggleRequest(BaseModel):

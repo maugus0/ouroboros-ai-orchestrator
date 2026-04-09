@@ -58,7 +58,7 @@ async def health_check():
                     await cursor.execute("SELECT 1")
                     await cursor.fetchone()
                     db_status = "connected"
-    except (RuntimeError, OSError, ConnectionError):
+    except Exception:  # pylint: disable=broad-exception-caught  # noqa: BLE001
         db_status = "error"
 
     return HealthResponse(

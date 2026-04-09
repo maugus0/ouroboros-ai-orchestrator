@@ -59,7 +59,8 @@ class AuthRepository:
         ttl_seconds: int,
         user_agent: Optional[str] = None,
         ip_address: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
+        """Rotate the refresh token hash. Returns False if the session was already revoked."""
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
         query = """
             UPDATE auth_sessions
@@ -71,7 +72,11 @@ class AuthRepository:
             async with conn.cursor() as cur:
                 await cur.execute(query, (new_token_hash, expires_at, user_agent, ip_address, session_id))
                 await conn.commit()
+                if cur.rowcount == 0:
+                    logger.warning("session_rotate_failed_no_match", session_id=session_id)
+                    return False
         logger.info("session_rotated", session_id=session_id)
+        return True
 
     async def revoke_session(self, session_id: str) -> None:
         query = """

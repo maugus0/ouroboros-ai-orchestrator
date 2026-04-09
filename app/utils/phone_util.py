@@ -42,7 +42,21 @@ def validate_phone_number(phone: str) -> Tuple[str, str]:
 
 
 def mask_phone_number(phone: str) -> str:
-    """Mask a phone number for safe display — e.g. +65****5678."""
+    """Mask a phone number for safe display — e.g. +65****5678.
+
+    Parses the country calling code so variable-length prefixes (+1, +65, +91,
+    +353 etc.) are preserved and only the subscriber digits are masked.
+    """
     if not phone or len(phone) < 8:
         return "****"
-    return phone[:3] + "*" * (len(phone) - 7) + phone[-4:]
+    try:
+        parsed = phonenumbers.parse(phone, None)
+        cc_digits = str(parsed.country_code)
+        prefix = f"+{cc_digits}"
+        suffix = phone[-4:]
+        middle_len = len(phone) - len(prefix) - 4
+        if middle_len < 1:
+            return "****"
+        return prefix + "*" * middle_len + suffix
+    except NumberParseException:
+        return phone[:3] + "*" * (len(phone) - 7) + phone[-4:]

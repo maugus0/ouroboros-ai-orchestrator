@@ -1,4 +1,9 @@
-"""Seed OuroborosAI team members for local development and testing."""
+"""Seed OuroborosAI team members for local development and testing.
+
+This script is for LOCAL DEV ONLY — it is never executed in production.
+The repository is private and the data below is used solely for convenient
+login during development. Do not run this against any shared/production database.
+"""
 
 import os
 import sys

@@ -107,11 +107,9 @@ def run_migration_file(connection, sql_file: Path) -> None:
 
         logger.info("Ran migration: %s", sql_file.name)
     except mysql.connector.Error:
-        cursor.close()
         raise
     except Exception as exc:
         logger.exception("Unexpected error in %s: %s", sql_file.name, exc)
-        cursor.close()
         raise
     finally:
         cursor.close()

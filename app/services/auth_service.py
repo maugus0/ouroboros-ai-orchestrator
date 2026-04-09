@@ -87,6 +87,7 @@ class AuthService:
 
         if not sms.success:
             logger.error("otp_send_failed_signup", user_id=user["id"], error=sms.error_message)
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to send OTP. Please try again.")
 
         logger.info("signup_complete", user_id=user["id"])
         return {
@@ -240,7 +241,11 @@ class AuthService:
 
         new_jti = secrets.token_urlsafe(64)
         new_hash = _sha256(new_jti)
-        await self.auth_repo.update_session_token(sid, new_hash, self.jwt_util.refresh_ttl, user_agent, ip_address)
+        rotated = await self.auth_repo.update_session_token(
+            sid, new_hash, self.jwt_util.refresh_ttl, user_agent, ip_address
+        )
+        if not rotated:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session was revoked concurrently")
 
         access = self.jwt_util.generate_access_token(
             user_id=uid, username=user.get("username"), phone_number=user.get("phone_number"), session_id=sid
@@ -416,6 +421,8 @@ class AuthService:
 
         if not sms.success:
             logger.error("forgot_pw_otp_send_failed", user_id=user["id"], error=sms.error_message)
+            await self.user_repo.clear_otp(user["id"])
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to send OTP. Please try again.")
 
         logger.info("forgot_password_otp_sent", user_id=user["id"])
         return {
@@ -532,6 +539,8 @@ class AuthService:
 
         if not sms.success:
             logger.error("mfa_otp_send_failed", user_id=user["id"], error=sms.error_message)
+            await self.user_repo.clear_otp(user["id"])
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to send MFA OTP. Please try again.")
 
         logger.info("mfa_otp_sent", user_id=user["id"])
         return {

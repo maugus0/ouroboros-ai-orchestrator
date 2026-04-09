@@ -2,7 +2,7 @@
 
 This script is for LOCAL DEV ONLY — it is never executed in production.
 The repository is private and the data below is used solely for convenient
-login during development. Do not run this against any shared/production database.
+login during development. We will not run this against any shared/production database.
 """
 
 import os
@@ -79,14 +79,18 @@ SEED_USERS = [
 
 
 def get_connection():
-    """Direct MySQL connection for seeding."""
-    return mysql.connector.connect(
+    """Direct MySQL connection for seeding (session tz = UTC)."""
+    conn = mysql.connector.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("DB_USERNAME", "root"),
         password=os.getenv("DB_PASSWORD", ""),
         database=os.getenv("DB_NAME", "ouroboros_orchestrator_db"),
     )
+    cursor = conn.cursor()
+    cursor.execute("SET time_zone = '+00:00'")
+    cursor.close()
+    return conn
 
 
 def _hash_password(password: str) -> str:

@@ -35,13 +35,17 @@ def validate_db_name(name: str) -> str:
 
 
 def get_server_connection():
-    """Connect to MySQL server without specifying a database."""
-    return mysql.connector.connect(
+    """Connect to MySQL server without specifying a database (session tz = UTC)."""
+    conn = mysql.connector.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "3306")),
         user=os.getenv("DB_USERNAME", "root"),
         password=os.getenv("DB_PASSWORD", ""),
     )
+    cursor = conn.cursor()
+    cursor.execute("SET time_zone = '+00:00'")
+    cursor.close()
+    return conn
 
 
 def create_database_if_not_exists(connection, db_name: str) -> None:

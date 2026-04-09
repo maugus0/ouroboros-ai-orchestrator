@@ -2,6 +2,10 @@
 --
 -- Idempotent: CREATE TABLE IF NOT EXISTS only — safe to re-run when tables are missing.
 --
+-- Timezone: The application sets `time_zone = '+00:00'` on every MySQL connection,
+-- so CURRENT_TIMESTAMP and UTC_TIMESTAMP() both return UTC. All DATETIME columns
+-- store UTC; the frontend converts to the user's local timezone for display.
+--
 -- profile_completed: application sets TRUE only when gender, email, about_me, profession,
 -- and interest are all populated (see app/utils/profile_completion.py).
 

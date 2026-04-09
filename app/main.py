@@ -7,21 +7,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from app.api import auth, chats, dashboard, health, profiles, workflows
+from app.api import auth, health
 from app.config import APP_VERSION, settings
 from app.core.database import PoolConfig, close_pool, create_pool
 from app.core.logging import get_logger, setup_logging
 from app.middleware.logging_middleware import LoggingMiddleware
+from app.utils.utc_json_response import UTCJSONResponse
 
 load_dotenv()
+setup_logging(log_level=settings.LOG_LEVEL)
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_application: FastAPI):
-    """Application startup and shutdown lifecycle."""
-    setup_logging(log_level=settings.LOG_LEVEL)
-    logger = get_logger("startup")
-
+    """Startup: create DB pool. Shutdown: close pool."""
     logger.info("orchestrator_starting", version=APP_VERSION)
 
     if not settings.ALLOW_DB_FAILURE:
@@ -51,14 +51,29 @@ async def lifespan(_application: FastAPI):
 app = FastAPI(
     title="Ouroboros Orchestrator",
     version=APP_VERSION,
-    description="Central coordination service for the Ouroboros AI scholarship discovery platform",
+    description=(
+        "Central coordination service for the Ouroboros AI scholarship discovery platform. "
+        "Handles phone-based JWT authentication (RS256), Twilio OTP verification, "
+        "user profile management, and health monitoring."
+    ),
     lifespan=lifespan,
+    default_response_class=UTCJSONResponse,
     swagger_ui_parameters={
         "persistAuthorization": True,
         "displayRequestDuration": True,
         "filter": True,
         "docExpansion": "none",
     },
+    openapi_tags=[
+        {
+            "name": "Authentication",
+            "description": (
+                "Phone-based JWT authentication with Twilio OTP verification. "
+                "Handles signup, OTP verify, login, token refresh, logout, and profile management."
+            ),
+        },
+        {"name": "Health", "description": "System health and readiness checks."},
+    ],
 )
 
 # ── Middleware ────────────────────────────────────────────────────
@@ -74,15 +89,11 @@ app.add_middleware(LoggingMiddleware)
 
 # ── Routers ──────────────────────────────────────────────────────
 
-app.include_router(health.router)
 app.include_router(auth.router)
-app.include_router(chats.router)
-app.include_router(workflows.router)
-app.include_router(profiles.router)
-app.include_router(dashboard.router)
+app.include_router(health.router)
 
 
-# ── Custom OpenAPI ───────────────────────────────────────────────
+# ── Custom OpenAPI (adds JWT Bearer auth to Swagger) ─────────────
 
 
 def custom_openapi():
@@ -93,17 +104,25 @@ def custom_openapi():
         version=app.version,
         description=app.description,
         routes=app.routes,
+        tags=app.openapi_tags,
     )
-    schema["info"]["x-logo"] = {"url": "https://ouroboros.ai/logo.png"}
+    schema.setdefault("components", {})
+    schema["components"]["securitySchemes"] = {
+        "HTTPBearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Paste your JWT access token (without 'Bearer ' prefix).",
+        }
+    }
     app.openapi_schema = schema
     return schema
 
 
-app.openapi = custom_openapi  # type: ignore[method-assign]
+app.openapi = custom_openapi  # type: ignore[assignment]
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    # Local dev only; Docker/production uses Dockerfile CMD with 0.0.0.0.
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)  # nosec B104

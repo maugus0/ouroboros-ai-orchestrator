@@ -47,6 +47,7 @@ async def create_pool(config: PoolConfig) -> aiomysql.Pool:
         maxsize=config.pool_size,
         autocommit=True,
         charset="utf8mb4",
+        init_command="SET time_zone = '+00:00'",
     )
     logger.info("database_pool_created", host=config.host, db=config.db, pool_size=config.pool_size)
     return _PoolHolder.pool

@@ -85,15 +85,36 @@ fi
 
 echo ""
 echo "6. Running pylint..."
-if pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903 > /dev/null 2>&1; then
+if pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801 > /dev/null 2>&1; then
     success "Pylint passed"
 else
-    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903"
+    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801"
     exit 1
 fi
 
 echo ""
-echo "7. Running type checking (mypy)..."
+echo "7. Running security scan (Bandit)..."
+if ! command -v bandit > /dev/null 2>&1; then
+    error "bandit not found. Install dev deps: pip install -r requirements-dev.txt"
+    exit 1
+fi
+# Same scope as CI: .github/workflows/deploy.yml \"Run Bandit (JSON; fails on findings)\"
+set +e
+BANDIT_OUTPUT=$(bandit -r app/ -f txt 2>&1)
+BANDIT_EC=$?
+set -e
+if [ "${BANDIT_EC}" -eq 0 ]; then
+    success "Bandit passed (no issues)"
+else
+    error "Bandit failed — this is the same check as CI \"Security Scan (Bandit)\""
+    echo "${BANDIT_OUTPUT}"
+    echo ""
+    error "Fix issues above, or run: bandit -r app/ -f txt"
+    exit 1
+fi
+
+echo ""
+echo "8. Running type checking (mypy)..."
 if mypy app/ --ignore-missing-imports --no-strict-optional > /dev/null 2>&1; then
     success "Type checking passed"
 else

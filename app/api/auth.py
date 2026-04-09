@@ -1,38 +1,586 @@
-"""Authentication route handlers — signup, login, refresh, me."""
+"""Authentication API endpoints (phone-based JWT with Twilio OTP)."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends, Query
+from fastapi.openapi.models import Example
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.responses import JSONResponse
 
-from app.middleware.auth_middleware import get_current_user
-from app.models.common import StandardResponse
+from app.middleware.auth_middleware import get_client_info, get_current_user, get_current_user_id
+from app.models.auth import (
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    ForgotPasswordVerifyRequest,
+    LoginRequest,
+    LogoutResponse,
+    MessageResponse,
+    MFARequiredResponse,
+    MFAToggleRequest,
+    MFAToggleResponse,
+    ProfileStatusResponse,
+    ProfileUpdateRequest,
+    RefreshRequest,
+    ResendOTPRequest,
+    ResendOTPResponse,
+    ResetPasswordRequest,
+    SessionResponse,
+    SignupRequest,
+    SignupResponse,
+    TokenResponse,
+    UserResponse,
+    VerifyMFARequest,
+    VerifyOTPRequest,
+)
+from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+security = HTTPBearer(scheme_name="HTTPBearer")
+
+# Swagger merges per-field examples into one JSON blob; use explicit body examples for XOR login.
+_EXAMPLE_LOGIN_PASSWORD = "MyP@ssw0rd"  # nosec B105
+_EXAMPLE_OPENAPI_PASSWORD = "MyP@ssw0rd"  # nosec B105 — OpenAPI sample only
+_EXAMPLE_OPENAPI_NEW_PASSWORD = "NewP@ssw0rd"  # nosec B105 — OpenAPI sample only
+_EXAMPLE_REFRESH_TOKEN_PLACEHOLDER = "<paste_refresh_token_from_login_response>"  # nosec B105
+
+_LOGIN_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "phone_number": Example(
+        summary="Login with phone",
+        description="Send **phone_number** + **password** only (omit username).",
+        value={"phone_number": "+6591234567", "password": _EXAMPLE_LOGIN_PASSWORD},
+    ),
+    "username": Example(
+        summary="Login with username",
+        description="Send **username** + **password** only (omit phone_number).",
+        value={"username": "alice_wonder", "password": _EXAMPLE_LOGIN_PASSWORD},
+    ),
+}
+
+_SIGNUP_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "register": Example(
+        summary="Typical signup",
+        description="E.164 phone in an allowed country; password needs upper, lower, digit, special.",
+        value={
+            "username": "alice_wonder",
+            "phone_number": "+6591234567",
+            "password": _EXAMPLE_OPENAPI_PASSWORD,
+            "first_name": "Alice",
+            "last_name": "Smith",
+        },
+    ),
+}
+
+_VERIFY_OTP_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "verify": Example(
+        summary="Verify 6-digit code",
+        value={"phone_number": "+6591234567", "otp_code": "123456"},
+    ),
+}
+
+_RESEND_OTP_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "resend": Example(
+        summary="Resend to same phone",
+        value={"phone_number": "+6591234567"},
+    ),
+}
+
+_REFRESH_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "rotate": Example(
+        summary="Exchange refresh token",
+        value={"refresh_token": _EXAMPLE_REFRESH_TOKEN_PLACEHOLDER},
+    ),
+}
+
+_PROFILE_PATCH_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "complete_profile": Example(
+        summary="Complete profile (all completion fields)",
+        description="Sets gender, email, about_me, profession, interest so `profile_completed` becomes true.",
+        value={
+            "gender": "female",
+            "email": "alice@example.com",
+            "about_me": "Full-stack developer interested in AI scholarships.",
+            "profession": "Software Engineer",
+            "interest": "degree",
+        },
+    ),
+    "partial_update": Example(
+        summary="Partial update",
+        description="Only sent fields are updated; null/omitted fields stay unchanged.",
+        value={"profession": "Researcher", "interest": "research"},
+    ),
+}
+
+_MFA_TOGGLE_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "enable": Example(
+        summary="Enable MFA",
+        value={"enabled": True},
+    ),
+    "disable": Example(
+        summary="Disable MFA",
+        value={"enabled": False},
+    ),
+}
+
+_VERIFY_MFA_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "after_login_202": Example(
+        summary="After login returned 202",
+        description="Use `user_id` from the MFA challenge response.",
+        value={"user_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "otp_code": "123456"},
+    ),
+}
+
+_FORGOT_PASSWORD_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "request_reset": Example(
+        summary="Request OTP",
+        value={"phone_number": "+6591234567"},
+    ),
+}
+
+_FORGOT_PASSWORD_VERIFY_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "set_new_password": Example(
+        summary="Verify OTP and new password",
+        value={
+            "user_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "otp_code": "123456",
+            "new_password": _EXAMPLE_OPENAPI_NEW_PASSWORD,
+        },
+    ),
+}
+
+_RESET_PASSWORD_OPENAPI_EXAMPLES: dict[str, Example] = {
+    "change_while_logged_in": Example(
+        summary="Settings password change",
+        value={
+            "current_password": _EXAMPLE_OPENAPI_PASSWORD,
+            "new_password": _EXAMPLE_OPENAPI_NEW_PASSWORD,
+        },
+    ),
+}
+
+auth_service = AuthService()
 
 
-@router.post("/signup")
-async def signup():
-    """Register a new user. (Implementation pending)"""
-    return StandardResponse(message="Signup endpoint — not yet implemented")
+@router.post(
+    "/signup",
+    response_model=SignupResponse,
+    status_code=201,
+    summary="Register a new user",
+    responses={
+        201: {"description": "User created, OTP sent for phone verification"},
+        409: {"description": "Phone number or username already registered"},
+        422: {"description": "Validation error (username format, password policy, etc.)"},
+        429: {"description": "OTP rate limit exceeded"},
+        500: {"description": "SMS delivery failed (Twilio); account may exist — fix config or use resend-otp"},
+    },
+)
+async def signup(
+    body: SignupRequest = Body(..., openapi_examples=_SIGNUP_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Register with **phone number**, **username**, **first/last name**, and **password**.
+
+    An OTP is sent via SMS to verify the phone number.
+    After signup, call `POST /auth/verify-otp` with the code received.
+    """
+    return await auth_service.signup(
+        username=body.username,
+        phone_number=body.phone_number,
+        password=body.password,
+        first_name=body.first_name,
+        last_name=body.last_name,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
 
 
-@router.post("/login")
-async def login():
-    """Authenticate and receive JWT tokens. (Implementation pending)"""
-    return StandardResponse(message="Login endpoint — not yet implemented")
+@router.post(
+    "/verify-otp",
+    response_model=TokenResponse,
+    summary="Verify phone OTP",
+    responses={
+        200: {"description": "Phone verified, JWT tokens returned"},
+        400: {"description": "Invalid or expired OTP"},
+        422: {"description": "Validation error"},
+        429: {"description": "Too many failed attempts"},
+    },
+)
+async def verify_otp(
+    body: VerifyOTPRequest = Body(..., openapi_examples=_VERIFY_OTP_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Verify the 6-digit OTP sent to the phone number during signup.
+
+    On success, returns **access_token** and **refresh_token**.
+    The user's phone is marked as verified.
+    """
+    return await auth_service.verify_otp(
+        phone_number=body.phone_number,
+        otp_code=body.otp_code,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
 
 
-@router.post("/refresh")
-async def refresh_token():
-    """Exchange a refresh token for a new access token. (Implementation pending)"""
-    return StandardResponse(message="Refresh endpoint — not yet implemented")
+@router.post(
+    "/resend-otp",
+    response_model=ResendOTPResponse,
+    summary="Resend OTP",
+    responses={
+        200: {"description": "New OTP sent"},
+        404: {"description": "No user with this phone number"},
+        422: {"description": "Validation error"},
+        429: {"description": "Cooldown or rate limit active"},
+        500: {"description": "SMS delivery failed (Twilio)"},
+    },
+)
+async def resend_otp(
+    body: ResendOTPRequest = Body(..., openapi_examples=_RESEND_OTP_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Resend OTP to an unverified phone number.
+
+    Rate-limited: **max 3 per 15 min**, **30 s cooldown** between sends.
+    """
+    return await auth_service.resend_otp(
+        phone_number=body.phone_number,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
 
 
-@router.post("/logout")
-async def logout(_claims: dict = Depends(get_current_user)):
-    """Invalidate the current session. (Implementation pending)"""
-    return StandardResponse(message="Logout endpoint — not yet implemented")
+@router.post(
+    "/login",
+    summary="Login",
+    responses={
+        200: {"description": "JWT tokens returned with user profile", "model": TokenResponse},
+        202: {"description": "MFA required — OTP sent to phone", "model": MFARequiredResponse},
+        401: {"description": "Invalid credentials"},
+        403: {"description": "Account disabled or phone not verified"},
+        422: {"description": "Validation error (e.g. missing phone and username)"},
+        429: {"description": "MFA OTP daily limit reached (when MFA enabled)"},
+        500: {"description": "MFA SMS delivery failed (when MFA enabled)"},
+    },
+)
+async def login(
+    body: LoginRequest = Body(..., openapi_examples=_LOGIN_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Login with **phone number** or **username** + **password**.
+
+    Requires the phone to be verified via OTP first.
+
+    - **If MFA is disabled:** returns `200` with JWT tokens and user profile.
+      The `user.profile_completed` flag tells the client whether to show
+      the profile-completion screen.
+    - **If MFA is enabled:** returns `202` with `mfa_required: true`,
+      `user_id`, and a masked phone number. The client must call
+      `POST /auth/mfa/verify` with the OTP to complete login.
+    """
+    result = await auth_service.login(
+        phone_number=body.phone_number,
+        username=body.username,
+        password=body.password,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+    if result.get("mfa_required"):
+        return JSONResponse(content=result, status_code=202)
+    return result
 
 
-@router.get("/me")
-async def get_me(claims: dict = Depends(get_current_user)):
-    """Return the authenticated user's profile. (Implementation pending)"""
-    return StandardResponse(data={"user_id": claims.get("sub")})
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Refresh token pair",
+    responses={
+        200: {"description": "New token pair issued"},
+        401: {"description": "Invalid, expired, revoked refresh token, or concurrent session revoke"},
+        422: {"description": "Validation error"},
+    },
+)
+async def refresh_tokens(
+    body: RefreshRequest = Body(..., openapi_examples=_REFRESH_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Exchange a **refresh token** for a new access + refresh token pair.
+
+    The old refresh token is rotated (invalidated). Each refresh token can only be used once.
+    """
+    result = await auth_service.refresh_tokens(
+        refresh_token=body.refresh_token,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+    return {
+        "access_token": result["access_token"],
+        "refresh_token": result["refresh_token"],
+        "token_type": result["token_type"],
+        "expires_in": result["expires_in"],
+    }
+
+
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    summary="Logout (revoke session)",
+    responses={
+        200: {"description": "Session revoked"},
+        401: {"description": "Missing or invalid Bearer token"},
+    },
+)
+async def logout(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    _user: dict = Depends(get_current_user),
+):
+    """Revoke the session tied to the current access token."""
+    return await auth_service.logout(credentials.credentials)
+
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current user profile",
+    responses={
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
+    },
+)
+async def get_me(user_id: str = Depends(get_current_user_id)):
+    """Return the authenticated user's full profile. Updates `last_active`."""
+    return await auth_service.get_profile(user_id)
+
+
+@router.patch(
+    "/profile",
+    response_model=UserResponse,
+    summary="Update profile",
+    responses={
+        200: {"description": "Profile updated; profile_completed true when all completion fields are set"},
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error (e.g. invalid gender or interest enum)"},
+    },
+)
+async def update_profile(
+    body: ProfileUpdateRequest = Body(..., openapi_examples=_PROFILE_PATCH_OPENAPI_EXAMPLES),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Complete or update user profile.
+
+    After first login, the client should call this to set **gender**, **email**,
+    **about_me**, **profession**, and **interest** (jobs, startups, research, or degree).
+    Any non-null field is updated; null fields are left unchanged.
+
+    ``profile_completed`` becomes **true** only when **all five** are present
+    (gender, non-empty email, about_me, profession, and a valid interest). If the user
+    later clears required data, it becomes **false** again.
+    """
+    return await auth_service.update_profile(
+        user_id=user_id,
+        first_name=body.first_name,
+        last_name=body.last_name,
+        gender=body.gender,
+        email=body.email,
+        about_me=body.about_me,
+        profession=body.profession,
+        interest=body.interest,
+    )
+
+
+@router.get(
+    "/profile-status",
+    response_model=ProfileStatusResponse,
+    summary="Check profile completion status",
+    responses={
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
+    },
+)
+async def profile_status(user_id: str = Depends(get_current_user_id)):
+    """Check whether the user's phone is verified and profile is completed."""
+    return await auth_service.get_profile_status(user_id)
+
+
+@router.get(
+    "/sessions",
+    response_model=list[SessionResponse],
+    summary="List user sessions",
+    responses={
+        200: {"description": "List of active (or all) sessions for the current user"},
+        401: {"description": "Missing or invalid Bearer token"},
+    },
+)
+async def list_sessions(
+    active_only: bool = Query(True, description="If true, only return active (non-revoked, non-expired) sessions"),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    List the authenticated user's sessions.
+
+    Useful for "active devices" UI or auditing login history.
+    Each session includes **created_at**, **last_active_at**, **user_agent**,
+    and **ip_address** so users can see when and where they logged in.
+    """
+    return await auth_service.get_sessions(user_id, active_only=active_only)
+
+
+# ── MFA ───────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/mfa/toggle",
+    response_model=MFAToggleResponse,
+    summary="Enable or disable MFA",
+    responses={
+        200: {"description": "MFA setting updated"},
+        400: {"description": "Phone must be verified before enabling MFA"},
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "User not found"},
+    },
+)
+async def toggle_mfa(
+    body: MFAToggleRequest = Body(..., openapi_examples=_MFA_TOGGLE_OPENAPI_EXAMPLES),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Toggle **multi-factor authentication** for the current user.
+
+    When enabled, every login will require an additional SMS OTP step.
+    The user's phone must be verified before MFA can be turned on.
+    """
+    return await auth_service.toggle_mfa(user_id, body.enabled)
+
+
+@router.post(
+    "/mfa/verify",
+    response_model=TokenResponse,
+    summary="Verify MFA OTP",
+    responses={
+        200: {"description": "MFA verified, JWT tokens returned"},
+        400: {"description": "Invalid or expired OTP, or MFA not enabled"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error"},
+        429: {"description": "Too many failed attempts"},
+    },
+)
+async def verify_mfa(
+    body: VerifyMFARequest = Body(..., openapi_examples=_VERIFY_MFA_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Complete the MFA login step.
+
+    After `POST /auth/login` returns `202` with `mfa_required: true`,
+    send the 6-digit OTP received via SMS along with the `user_id`.
+    On success, returns JWT tokens and user profile (same shape as normal login).
+    """
+    return await auth_service.verify_mfa(
+        user_id=body.user_id,
+        otp_code=body.otp_code,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+# ── Password ─────────────────────────────────────────────────────
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    summary="Forgot password — request OTP",
+    responses={
+        200: {"description": "OTP sent to phone"},
+        403: {"description": "Phone not verified or account disabled"},
+        404: {"description": "No user with this phone number"},
+        422: {"description": "Validation error"},
+        429: {"description": "Password was changed recently (1/week limit) or OTP rate limit"},
+        500: {"description": "SMS delivery failed (Twilio); stored OTP cleared"},
+    },
+)
+async def forgot_password(
+    body: ForgotPasswordRequest = Body(..., openapi_examples=_FORGOT_PASSWORD_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Start the **forgot-password** flow.
+
+    Send an OTP to the user's verified phone number. After receiving the code,
+    call `POST /auth/forgot-password/verify` with the OTP and new password.
+
+    Limited to **once per week** — if the password was changed in the last 7 days,
+    this endpoint returns 429.
+    """
+    return await auth_service.forgot_password(
+        phone_number=body.phone_number,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/forgot-password/verify",
+    response_model=MessageResponse,
+    summary="Forgot password — verify OTP and set new password",
+    responses={
+        200: {"description": "Password updated, all sessions revoked"},
+        400: {"description": "Invalid/expired OTP or same password"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error"},
+        429: {"description": "Too many failed attempts"},
+    },
+)
+async def verify_forgot_password(
+    body: ForgotPasswordVerifyRequest = Body(..., openapi_examples=_FORGOT_PASSWORD_VERIFY_OPENAPI_EXAMPLES),
+    client: dict = Depends(get_client_info),
+):
+    """
+    Complete the **forgot-password** flow.
+
+    Verify the OTP and set a new password. All existing sessions are revoked
+    for security, so the user must log in again with the new password.
+    """
+    return await auth_service.verify_forgot_password(
+        user_id=body.user_id,
+        otp_code=body.otp_code,
+        new_password=body.new_password,
+        ip_address=client["ip_address"],
+        user_agent=client["user_agent"],
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Reset password (authenticated)",
+    responses={
+        200: {"description": "Password updated, all sessions revoked"},
+        400: {"description": "New password same as current"},
+        401: {"description": "Current password is incorrect or missing Bearer token"},
+        404: {"description": "User not found"},
+        422: {"description": "Validation error (password policy)"},
+        429: {"description": "Password change limit (1/month)"},
+    },
+)
+async def reset_password(
+    body: ResetPasswordRequest = Body(..., openapi_examples=_RESET_PASSWORD_OPENAPI_EXAMPLES),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Change password while logged in (from Settings page).
+
+    Requires the **current password** for verification. On success, all sessions
+    are revoked and the user must log in again.
+
+    Limited to **once per month** — returns 429 if the password was changed
+    in the last 30 days.
+    """
+    return await auth_service.reset_password(
+        user_id=user_id,
+        current_password=body.current_password,
+        new_password=body.new_password,
+    )

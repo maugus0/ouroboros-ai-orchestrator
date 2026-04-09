@@ -1,6 +1,6 @@
 # Ouroboros Orchestrator Service
 
-Central coordination service for the **Ouroboros AI** scholarship discovery platform. The Orchestrator is the single backend entry-point the frontend communicates with — it handles authentication, workflow coordination, agent delegation, result aggregation, and audit logging.
+Central coordination service for the **Ouroboros AI** scholarship discovery platform. The Orchestrator is the single backend entry-point the frontend communicates with — handling authentication, user management, and health monitoring, with business logic (workflows, agents, chats) to be added incrementally.
 
 ---
 
@@ -8,12 +8,12 @@ Central coordination service for the **Ouroboros AI** scholarship discovery plat
 
 - [Overview](#overview)
 - [Architecture](#architecture)
-- [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Database Schema](#database-schema)
 - [API Endpoints](#api-endpoints)
+- [Auth Flow](#auth-flow)
 - [Development Workflow](#development-workflow)
 - [Testing](#testing)
 - [CI/CD Pipeline](#cicd-pipeline)
@@ -28,20 +28,21 @@ Central coordination service for the **Ouroboros AI** scholarship discovery plat
 
 The Orchestrator Service is the **central nervous system** of the Ouroboros AI platform:
 
-1. **Authenticates users** via self-rolled JWT RS256 (Orchestrator owns the private key)
-2. **Manages chat sessions** and message history
-3. **Drives a sequential workflow** state machine: Profile → Programs → Scholarships → Eligibility → Application Support
-4. **Delegates to 5 agent microservices** via HTTP (httpx + tenacity retry)
-5. **Aggregates results** from all agents into self-contained JSON blobs
-6. **Audit-logs every agent call** with request/response payloads, latency, and trace IDs
+1. **Authenticates users** via self-rolled JWT (RS256) with phone-based registration
+2. **Verifies phone numbers** using Twilio OTP (SMS or Verify API)
+3. **Supports login** by phone number or username + password
+4. **Manages user profiles** with a completion flow (gender, email, about me, profession, interest)
+5. **Tracks sessions** with active-device visibility and duration metrics
+6. **Exposes a health endpoint** for monitoring and readiness checks
 
 **Key Design Principles:**
 
 - Single entry-point — the frontend communicates **only** with the orchestrator
-- Agent isolation — microservices never call each other; the orchestrator fans out
-- No ORM overhead — raw SQL with `aiomysql` async connection pool
-- Retry resilience — exponential backoff on all inter-service HTTP calls
-- Trace propagation — `X-Trace-ID` header flows through every agent call for correlated debugging
+- Async-first — `aiomysql` connection pool for non-blocking I/O (the orchestrator coordinates external microservices over HTTP, so async is essential)
+- Self-rolled authentication — no third-party auth providers; full control over JWT lifecycle
+- No ORM overhead — raw SQL with repository pattern
+- Trace propagation — `X-Trace-ID` header flows through every request for correlated debugging
+- UTC everywhere — all timestamps stored and serialized as UTC ISO 8601
 
 ---
 
@@ -50,7 +51,7 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 ```
 ┌─────────────────────────────────────┐
 │       Frontend (React + Vite)       │
-│       (http://localhost:3000)       │
+│       (http://localhost:8080)       │
 └──────────────┬──────────────────────┘
                │
                │ JWT Bearer Token
@@ -60,77 +61,57 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 │                                                      │
 │  ┌─────────────────────────────────────────────┐     │
 │  │  API Layer (FastAPI)                        │     │
-│  │  POST /auth/signup, /login, /refresh        │     │
-│  │  GET  /auth/me                              │     │
-│  │  CRUD /chats                                │     │
-│  │  POST /workflows/{id}/start                 │     │
-│  │  GET  /dashboard/{id}                       │     │
+│  │  POST /auth/signup, /auth/verify-otp        │     │
+│  │  POST /auth/login, /auth/refresh            │     │
+│  │  POST /auth/logout, /auth/resend-otp        │     │
+│  │  GET  /auth/me, /auth/profile-status        │     │
+│  │  PATCH /auth/profile                        │     │
+│  │  GET  /auth/sessions                        │     │
+│  │  POST /auth/mfa/toggle, /auth/mfa/verify   │     │
+│  │  GET  / and /health                         │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
-│  │  Service Layer                              │     │
-│  │  AuthService        (signup, login, tokens) │     │
-│  │  ChatService        (session management)    │     │
-│  │  WorkflowService    (state machine)         │     │
-│  │  AggregationService (combine results)       │     │
+│  │  Middleware (JWT RS256, CORS, Logging)       │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
-│  │  Client Layer (httpx + tenacity)            │     │
-│  │  StudentProfileClient     → :8001           │     │
-│  │  ProgramDiscoveryClient   → :8002           │     │
-│  │  ScholarshipDiscovClient  → :8003           │     │
-│  │  EligibilityClient        → :8004           │     │
-│  │  ApplicationSupportClient → :8005           │     │
+│  │  Service Layer (auth_service, twilio_service)│     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
-│  │  Repository Layer (Raw SQL / aiomysql)      │     │
-│  │  UserRepository                             │     │
-│  │  ChatRepository                             │     │
-│  │  WorkflowRepository                         │     │
-│  │  AgentCallLogRepository                     │     │
+│  │  Repository Layer (raw SQL / aiomysql)       │     │
+│  │  UserRepository, AuthRepository             │     │
+│  └─────────────────────────────────────────────┘     │
+│                        │                             │
+│  ┌─────────────────────▼───────────────────────┐     │
+│  │  Core (async DB pool, structured logging)    │     │
 │  └─────────────────────────────────────────────┘     │
 └──────────────┬───────────────────────────────────────┘
                │
                ▼
-      ┌─────────────────┐
-      │   MySQL 8.0     │
-      │   (aiomysql)    │
-      └─────────────────┘
-```
-
-### Workflow State Machine
-
-```
-INITIATED → PROFILE_PARSING → PROFILE_COMPLETE
-  → DISCOVERING_PROGRAMS → DISCOVERING_SCHOLARSHIPS
-  → MATCHING → GENERATING_MATERIALS → COMPLETE
-  (any state may transition to ERROR; retry resumes from last successful state)
+      ┌─────────────────┐       ┌─────────────────┐
+      │   MySQL 8.0     │       │   Twilio API    │
+      │   (aiomysql)    │       │   (SMS / OTP)   │
+      └─────────────────┘       └─────────────────┘
 ```
 
 ### Authentication Strategy
 
 | Concern | Approach |
 |---------|----------|
-| User → Orchestrator | JWT RS256 (self-rolled, Orchestrator owns private key) |
-| Orchestrator → Agent | `X-Service-Token` shared secret header |
-| Password storage | bcrypt via `passlib` |
-| Token types | Access (1 hour) + Refresh (30 days) |
-
----
-
-## Features
-
-- **Self-rolled JWT RS256** authentication with access + refresh tokens
-- **Sequential workflow** state machine with retry-from-last-success on failure
-- **5 agent HTTP clients** with exponential backoff retry (tenacity)
-- **Structured logging** via structlog with JSON output in production
-- **Distributed tracing** via `X-Trace-ID` propagation across all agent calls
-- **Audit logging** for every agent HTTP call (request, response, latency, status)
-- **CORS configuration** for frontend development
-- **Docker Compose** for local development with MySQL 8.0
-- **Comprehensive CI/CD** pipeline with formatting, linting, tests, security, and Docker build
+| Registration | Phone number + username + first/last name + password (OTP verification required) |
+| Login | Phone number **or** username + password |
+| Password storage | **bcrypt** (cost factor 12) |
+| Token signing | **RS256** (RSA private key signs, public key verifies) |
+| Access token | 15 min TTL, claims: `{sub, token_type, username, phone, sid}` |
+| Refresh token | 7 day TTL, SHA-256 hashed in DB, rotation on use |
+| Phone verification | Twilio OTP (6-digit, 5 min expiry, max 3 attempts) |
+| Session tracking | `auth_sessions` table with `last_active_at`, `revoked_at` for duration metrics |
+| Profile completion | First login: gender, email, about me, profession, interest (jobs/startups/research/degree) |
+| MFA (optional) | When enabled, login requires a second SMS OTP step (max 10/day) before tokens are issued |
+| Forgot password | OTP to phone → verify → new password. Limited to once per week |
+| Reset password | Authenticated change (current + new password). Limited to once per month |
 
 ---
 
@@ -140,7 +121,7 @@ INITIATED → PROFILE_PARSING → PROFILE_COMPLETE
 |------|---------|---------|
 | Python | 3.11+ | Runtime |
 | MySQL | 8.0+ | Database |
-| OpenSSL | any | JWT RS256 key generation |
+| Twilio account | — | OTP delivery |
 | Docker | 24.0+ | Containerised deployment (optional) |
 
 ---
@@ -155,37 +136,41 @@ cd ouroboros-ai-orchestrator
 
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements-dev.txt
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
 
-### 2. Generate JWT Keys
+### 2. Generate RS256 Key Pair
 
 ```bash
 openssl genrsa -out jwt_private.pem 2048
 openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
 ```
 
-### 3. Configure Environment
+Copy each PEM file’s full text into `.env` as a single-line value: replace real line breaks with the two characters `\` and `n` inside the double-quoted string. Then **delete** `jwt_private.pem` and `jwt_public.pem` locally — `*.pem` is gitignored so keys never land in the repo.
+
+```
+JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+```
+
+### 3. Set Up Twilio
+
+1. Sign up at [twilio.com](https://www.twilio.com)
+2. Get your **Account SID** and **Auth Token** from the console
+3. Get a Twilio phone number (for sending SMS)
+4. Optionally create a **Verify Service** for production
+
+### 4. Configure Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+Edit `.env` with your credentials (DB password, JWT keys, Twilio creds). See `.env.example` for all available settings with descriptions.
 
-```bash
-DB_HOST=localhost
-DB_NAME=ouroboros_orchestrator_db
-DB_USERNAME=root
-DB_PASSWORD=your_mysql_password
-
-JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
-```
-
-See [Configuration](#configuration) for the full reference.
-
-### 4. Database Setup
+### 5. Database Setup
 
 **Option A: Docker (Recommended)**
 
@@ -200,47 +185,33 @@ docker compose logs -f mysql   # wait for "ready for connections"
 mysql -u root -p -e "CREATE DATABASE ouroboros_orchestrator_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 ```
 
-### 5. Run Migrations
+### 6. Run Migrations
 
 ```bash
 python scripts/run_migrations.py
 ```
 
-Expected output:
-
-```
-Running migration: 001_create_users.sql
-  ✓ 001_create_users.sql applied
-Running migration: 002_create_chats_messages.sql
-  ✓ 002_create_chats_messages.sql applied
-Running migration: 003_create_workflow_tables.sql
-  ✓ 003_create_workflow_tables.sql applied
-
-All migrations applied successfully.
-```
-
-### 6. (Optional) Seed Test Data
+### 7. (Optional) Seed Test Data
 
 ```bash
-python scripts/seed_test_data.py
+python scripts/seed_users.py
 ```
 
-### 7. Start the Service
+### 8. Start the Service
 
 ```bash
 chmod +x start.sh
 ./start.sh
-# or: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# or: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 8. Verify Health
+### 9. Verify
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"healthy","version":"0.1.0","database":"not_connected"}
 ```
 
-Swagger docs are available at `http://localhost:8000/docs`.
+**Swagger UI**: http://localhost:8000/docs (click **Authorize** and paste a JWT access token to test protected endpoints).
 
 ---
 
@@ -257,48 +228,35 @@ Swagger docs are available at `http://localhost:8000/docs`.
 | `DB_USERNAME` | No | `root` | MySQL user |
 | `DB_PASSWORD` | Yes | — | MySQL password |
 | `DB_POOL_SIZE` | No | `10` | Max connections in pool |
-| `DB_POOL_NAME` | No | `orchestrator_pool` | Connection pool name |
-| `DB_CONNECTION_TIMEOUT` | No | `20` | Connection timeout (seconds) |
-| **JWT Authentication** ||||
-| `JWT_PRIVATE_KEY` | Yes | — | RSA private key (PEM, for issuing tokens) |
-| `JWT_PUBLIC_KEY` | Yes | — | RSA public key (PEM, for validating tokens) |
-| `JWT_ACCESS_TOKEN_EXP_SECONDS` | No | `3600` | Access token TTL (1 hour) |
-| `JWT_REFRESH_TOKEN_EXP_SECONDS` | No | `2592000` | Refresh token TTL (30 days) |
+| **JWT (RS256)** ||||
+| `JWT_PRIVATE_KEY` | Yes | — | RSA private key PEM (escape newlines as `\n`) |
+| `JWT_PUBLIC_KEY` | Yes | — | RSA public key PEM |
+| `JWT_ACCESS_TOKEN_EXP_SECONDS` | No | `900` | Access token TTL (15 min) |
+| `JWT_REFRESH_TOKEN_EXP_SECONDS` | No | `604800` | Refresh token TTL (7 days) |
 | `JWT_ISSUER` | No | `ouroboros.ai/auth` | Token issuer claim |
 | `JWT_AUDIENCE` | No | `ouroboros-api` | Token audience claim |
-| **Agent Services** ||||
-| `STUDENT_PROFILE_SERVICE_URL` | No | `http://localhost:8001` | Student Profile agent URL |
-| `PROGRAM_DISCOVERY_SERVICE_URL` | No | `http://localhost:8002` | Program Discovery agent URL |
-| `SCHOLARSHIP_DISCOVERY_SERVICE_URL` | No | `http://localhost:8003` | Scholarship Discovery agent URL |
-| `ELIGIBILITY_SERVICE_URL` | No | `http://localhost:8004` | Eligibility Engine agent URL |
-| `APPLICATION_SUPPORT_SERVICE_URL` | No | `http://localhost:8005` | Application Support agent URL |
-| **Inter-Service Auth** ||||
-| `X_SERVICE_TOKEN` | Yes | — | Shared secret for orchestrator → agent calls |
-| **HTTP Client** ||||
-| `AGENT_CALL_TIMEOUT` | No | `30` | Agent HTTP call timeout (seconds) |
-| `AGENT_CALL_RETRIES` | No | `2` | Max retry attempts per agent call |
-| `AGENT_CALL_BACKOFF_FACTOR` | No | `1.0` | Exponential backoff multiplier |
+| **Twilio** ||||
+| `TWILIO_ACCOUNT_SID` | Yes | — | Twilio Account SID |
+| `TWILIO_AUTH_TOKEN` | Yes | — | Twilio Auth Token |
+| `TWILIO_PHONE_NUMBER` | Yes | — | Twilio sender number (E.164) |
+| `TWILIO_VERIFY_SERVICE_SID` | No | — | Twilio Verify service (optional) |
+| **OTP** ||||
+| `OTP_EXPIRY_SECONDS` | No | `300` | OTP validity (5 min) |
+| `OTP_MAX_ATTEMPTS` | No | `3` | Max failed OTP attempts |
+| `OTP_COOLDOWN_SECONDS` | No | `30` | Min seconds between sends |
+| `OTP_RATE_LIMIT_MAX_REQUESTS` | No | `3` | Max OTPs per rate window |
+| `OTP_RATE_LIMIT_WINDOW_SECONDS` | No | `900` | Rate limit window (15 min) |
+| `MFA_OTP_DAILY_LIMIT` | No | `10` | Max MFA OTPs per user per day |
+| **Password Reset** ||||
+| `FORGOT_PASSWORD_COOLDOWN_DAYS` | No | `7` | Min days between forgot-password resets |
+| `RESET_PASSWORD_COOLDOWN_DAYS` | No | `30` | Min days between authenticated password changes |
 | **Application** ||||
-| `LOG_LEVEL` | No | `INFO` | `DEBUG\|INFO\|WARNING\|ERROR\|CRITICAL` |
-| `USE_MOCK_DATA` | No | `true` | Use in-memory repos (tests only) |
-| `ALLOW_DB_FAILURE` | No | `false` | Continue if DB unavailable (tests only) |
-| `CORS_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated allowed origins |
-| **Docker** ||||
-| `DOCKER_MYSQL_PORT` | No | `3307` | Host port for MySQL container |
+| `LOG_LEVEL` | No | `INFO` | Logging level |
+| `ALLOW_DB_FAILURE` | No | `false` | Skip DB on startup (tests only) |
+| `CORS_ORIGINS` | No | `http://localhost:8080,...` | Allowed origins |
+| `ALLOWED_COUNTRY_CODES` | No | `["SG","IN",...]` | Allowed phone countries (JSON array) |
 
-### Docker / CI Prefix Compatibility
-
-The service also reads `MYSQL_*` variables for Docker/CI environments:
-
-| `DB_*` Prefix | Equivalent `MYSQL_*` |
-|---------------|---------------------|
-| `DB_HOST` | `MYSQL_HOST` |
-| `DB_NAME` | `MYSQL_DATABASE` |
-| `DB_USERNAME` | `MYSQL_USER` |
-| `DB_PASSWORD` | `MYSQL_PASSWORD` |
-| `DB_PORT` | `MYSQL_PORT` |
-
-Resolution logic lives in the `settings.get_db_*()` helpers in `app/config.py`.
+Docker, inter-service, and agent settings are documented in `.env.example`.
 
 ---
 
@@ -308,33 +266,50 @@ Resolution logic lives in the `settings.get_db_*()` helpers in `app/config.py`.
 
 | Table | Purpose |
 |-------|---------|
-| `users` | User records with bcrypt password hashes |
-| `chats` | Chat sessions (one chat = one workflow run) |
-| `messages` | Chat messages (user, assistant, system roles) |
-| `workflow_runs` | Workflow state machine with current/last-successful state |
-| `workflow_results` | Aggregated JSON blobs from all agent outputs |
-| `agent_call_logs` | Audit trail — HTTP status, latency, request/response payloads |
+| `users` | User accounts: phone-based auth, OTP fields, profile data (first/last name, gender, email, profession, interest) |
+| `auth_sessions` | JWT session tracking — one row per login. Tracks `last_active_at` and `revoked_at` for session duration |
+| `otp_logs` | Audit trail for OTP events with context (signup/mfa/forgot_password) for per-flow rate limits |
 
-### Relationships
+### Users Table
 
-```
-users           (1) ──< (N) chats
-users           (1) ──< (N) workflow_runs
-chats           (1) ──< (N) messages
-chats           (1) ──  (1) workflow_runs
-workflow_runs   (1) ──< (N) workflow_results
-workflow_runs   (1) ──< (N) agent_call_logs
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | VARCHAR(36) | UUID v4 primary key |
+| `username` | VARCHAR(50) | Unique, 3-20 chars |
+| `phone_number` | VARCHAR(20) | E.164 format, unique |
+| `phone_country_code` | VARCHAR(5) | ISO 3166-1 alpha-2 |
+| `phone_verified` | BOOLEAN | OTP verification status |
+| `password_hash` | TEXT | bcrypt hash |
+| `first_name` | VARCHAR(50) | Required on signup |
+| `last_name` | VARCHAR(50) | Required on signup |
+| `email` | VARCHAR(255) | Optional, set during profile completion |
+| `gender` | ENUM | `male`, `female`, `other`, or `prefer_not_to_say` |
+| `about_me` | TEXT | Short bio |
+| `profession` | VARCHAR(100) | User's profession |
+| `interest` | ENUM | `jobs`, `startups`, `research`, or `degree` |
+| `profile_completed` | BOOLEAN | `true` only when gender, email, about_me, profession, and interest are all set |
+| `mfa_enabled` | BOOLEAN | When `true`, login requires additional SMS OTP verification |
+| `password_changed_at` | DATETIME | Last password change (enforces cooldown limits) |
+
+### Auth Sessions Table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | VARCHAR(36) | Session UUID (also used as `sid` in JWT claims) |
+| `user_id` | VARCHAR(36) | FK → users.id (CASCADE delete) |
+| `token_hash` | VARCHAR(255) | SHA-256 hash of current refresh token JTI |
+| `expires_at` | DATETIME | Session expiry (UTC) |
+| `is_revoked` | BOOLEAN | Set to `true` on logout |
+| `revoked_at` | DATETIME | When the session was revoked |
+| `last_active_at` | DATETIME | Updated on each token refresh |
+| `user_agent` | TEXT | Client user-agent at login |
+| `ip_address` | VARCHAR(50) | Client IP at session creation |
 
 ### Migrations
 
-Run in order via `python scripts/run_migrations.py`:
-
 ```
 migrations/
-├── 001_create_users.sql
-├── 002_create_chats_messages.sql
-└── 003_create_workflow_tables.sql
+└── 001_create_users.sql   # users + auth_sessions + otp_logs
 ```
 
 ---
@@ -343,52 +318,114 @@ migrations/
 
 **Base URL**: `http://localhost:8000`
 
+### Authentication (`/auth`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/auth/signup` | Public | Register with phone, username, first/last name + password; sends OTP |
+| POST | `/auth/verify-otp` | Public | Verify OTP; returns JWT tokens |
+| POST | `/auth/resend-otp` | Public | Resend OTP (rate-limited) |
+| POST | `/auth/login` | Public | Phone or username + password; returns tokens (200) or MFA challenge (202) |
+| POST | `/auth/refresh` | Public | Rotate refresh token → new token pair |
+| POST | `/auth/logout` | Bearer | Revoke current session |
+| GET | `/auth/me` | Bearer | Current user profile |
+| PATCH | `/auth/profile` | Bearer | Update profile (gender, email, about me, profession, interest) |
+| GET | `/auth/profile-status` | Bearer | Check profile/phone verification status |
+| GET | `/auth/sessions` | Bearer | List active sessions (or all with `?active_only=false`) |
+| POST | `/auth/mfa/toggle` | Bearer | Enable or disable MFA for the current user |
+| POST | `/auth/mfa/verify` | Public | Verify MFA OTP to complete login (after 202 challenge) |
+| POST | `/auth/forgot-password` | Public | Request OTP for password reset (1/week limit) |
+| POST | `/auth/forgot-password/verify` | Public | Verify OTP and set new password |
+| POST | `/auth/reset-password` | Bearer | Change password with current password (1/month limit) |
+
 ### Health
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/` | No | Root health check |
-| GET | `/health` | No | Detailed health status |
+| GET | `/` | Public | Root health check (message, version, status) |
+| GET | `/health` | Public | Detailed health with database connectivity check |
 
-### Authentication
+### API Documentation
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/auth/signup` | No | Register a new user |
-| POST | `/auth/login` | No | Authenticate and receive JWT tokens |
-| POST | `/auth/refresh` | No | Exchange refresh token for new access token |
-| POST | `/auth/logout` | Bearer | Invalidate current session |
-| GET | `/auth/me` | Bearer | Return authenticated user profile |
+- **Swagger UI**: http://localhost:8000/docs — All `/auth` routes include **named request examples** (e.g. phone-only vs username-only login, profile completion, MFA, password flows) plus documented status codes (including SMS failures and rate limits).
+- **ReDoc**: http://localhost:8000/redoc
+- **OpenAPI JSON**: http://localhost:8000/openapi.json
 
-### Chats
+Use **Authorize** in Swagger and paste the JWT access token (no "Bearer " prefix).
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/chats/` | Bearer | Create a new chat session |
-| GET | `/chats/` | Bearer | List all chats for the user |
-| GET | `/chats/{chat_id}` | Bearer | Retrieve a single chat with messages |
-| DELETE | `/chats/{chat_id}` | Bearer | Soft-delete a chat session |
+---
 
-### Workflows
+## Auth Flow
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/workflows/{chat_id}/start` | Bearer | Kick off the agent workflow |
-| GET | `/workflows/{chat_id}/status` | Bearer | Return current workflow state |
-| POST | `/workflows/{chat_id}/retry` | Bearer | Retry from last successful state |
+### Signup → OTP → Login → Profile Completion
 
-### Profiles (Proxy)
+```
+1. POST /auth/signup
+   Body: { username, phone_number, password, first_name, last_name }
+   → User created (unverified), OTP sent via Twilio
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/profiles/parse` | Bearer | Upload CV via Student Profile agent |
-| GET | `/profiles/me` | Bearer | Get current user's parsed profile |
+2. POST /auth/verify-otp
+   Body: { phone_number, otp_code }
+   → Phone verified, JWT tokens returned
 
-### Dashboard
+3. POST /auth/login
+   Body: { phone_number, password }  OR  { username, password }
+   → 200: JWT tokens returned (MFA off)
+   → 202: { mfa_required: true, user_id, phone_number } (MFA on)
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/dashboard/{chat_id}` | Bearer | Aggregated results from all agents |
+3b. POST /auth/mfa/verify   (only when login returns 202)
+    Body: { user_id, otp_code }
+    → JWT tokens returned after OTP verification
+
+4. PATCH /auth/profile   (first login — complete profile)
+   Body: { gender, email, about_me, profession, interest }
+   → `profile_completed` is set to **true** only when **all five** fields are present
+```
+
+### MFA (Multi-Factor Authentication)
+
+Users can enable MFA from their settings. When enabled, every login triggers an additional SMS OTP challenge (max **10 per day**):
+
+1. `POST /auth/mfa/toggle` — `{ "enabled": true }` (requires verified phone)
+2. On next login, the server returns `202` with `mfa_required: true`
+3. Client calls `POST /auth/mfa/verify` with the OTP to get JWT tokens
+4. `POST /auth/mfa/toggle` — `{ "enabled": false }` to disable
+
+### Forgot Password
+
+```
+1. POST /auth/forgot-password
+   Body: { phone_number }
+   → OTP sent to verified phone (limited to 1/week since last password change)
+
+2. POST /auth/forgot-password/verify
+   Body: { user_id, otp_code, new_password }
+   → Password updated, all sessions revoked, user must login again
+```
+
+### Reset Password (Authenticated)
+
+```
+POST /auth/reset-password   (requires Bearer token)
+Body: { current_password, new_password }
+→ Password updated, all sessions revoked (limited to 1/month)
+```
+
+### Token Lifecycle
+
+```
+Access Token  (15 min)  ──→  Protected endpoints via Authorization: Bearer <token>
+Refresh Token (7 days)  ──→  POST /auth/refresh → new token pair (old rotated)
+Logout                  ──→  POST /auth/logout → session revoked (revoked_at stamped)
+```
+
+### Session Tracking
+
+Each login creates a row in `auth_sessions`. The `last_active_at` column is updated on every token refresh, and `revoked_at` is stamped on logout. This enables:
+
+- **Active devices** — `GET /auth/sessions` shows where the user is logged in
+- **Session duration** — `revoked_at - created_at` (or `last_active_at - created_at` for active sessions)
+- **Security audit** — see IP address and user-agent for every session
 
 ---
 
@@ -397,19 +434,10 @@ migrations/
 ### Code Quality Checks
 
 ```bash
-# Format code
-black app/ tests/
-isort app/ tests/
-
-# Lint
-flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
-pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903
-
-# Type check
+black app/ tests/ scripts/
+isort app/ tests/ scripts/
+flake8 app/ tests/ scripts/ --max-line-length=120 --extend-ignore=E203,W503,E501
 mypy app/ --ignore-missing-imports --no-strict-optional
-
-# Run tests
-ALLOW_DB_FAILURE=true pytest tests/ -v
 ```
 
 ### Pre-Commit Script
@@ -419,7 +447,7 @@ chmod +x pre-commit-check.sh
 ./pre-commit-check.sh
 ```
 
-Runs Black, isort, flake8, syntax validation, tests, pylint, and mypy in sequence (all must pass).
+Runs: Black, isort, flake8, syntax validation, pytest, pylint, Bandit, and mypy.
 
 ---
 
@@ -438,17 +466,33 @@ ALLOW_DB_FAILURE=true pytest tests/ --cov=app --cov-report=html -v
 open htmlcov/index.html
 ```
 
+### Seed Data
+
+The seed script creates five OuroborosAI team members for local testing:
+
+| Username | Name | Phone | Email |
+|----------|------|-------|-------|
+| Maugus | Ahan Jaiswal | +91-9818772178 | ahanjaiswal12@gmail.com |
+| NPT | Phu Truong Nguyen | +65-81234501 | phu@gmail.com |
+| Feri | Feri Setiawan | +65-81234502 | feri@gmail.com |
+| Stella | Xingyuan Liu | +65-81234503 | xingyuan@gmail.com |
+| Lantya | Lanting Zhao | +65-81234504 | lanting@gmail.com |
+
+All share password: `Admin123@`
+
 ### Test Structure
 
 ```
 tests/
-├── conftest.py                  # Shared fixtures
+├── conftest.py                     # RSA key generation, shared fixtures
 ├── unit/
-│   ├── test_config.py           # Configuration loading
-│   ├── test_health.py           # Health check endpoints
-│   ├── test_security.py         # JWT creation and validation
-│   ├── test_exceptions.py       # Custom exception classes
-│   └── test_trace_id.py         # Trace ID generation
+│   ├── test_auth_service.py        # Signup, OTP, login, MFA, logout (mocked)
+│   ├── test_jwt_util.py            # Token generation and validation
+│   ├── test_password_util.py       # bcrypt hash/verify
+│   ├── test_phone_util.py          # Phone validation and masking
+│   ├── test_otp_util.py            # OTP generation and expiry
+│   ├── test_profile_completion.py  # profile_completed field rules
+│   └── test_config.py              # Configuration loading
 └── integration/
     └── (future integration tests)
 ```
@@ -461,44 +505,15 @@ tests/
 
 **Trigger**: Pull requests to `main` or `develop`
 
-### Pipeline Stages
-
 | Stage | Description |
 |-------|-------------|
 | **Format** | Black + isort validation |
-| **Lint** | **flake8** + **pylint** (both blocking; same disables as local: `C0111`, `R0903`) |
+| **Lint** | flake8 + pylint |
 | **Unit Tests** | pytest with JUnit XML output |
-| **Type Check** | **mypy** static analysis — blocking (after format + lint) |
-| **Integration Tests** | pytest with coverage HTML + XML (after format + lint) |
-| **Security Audit** | Bandit static security analysis (after format + lint) |
-| **Docker Build** | Verify image builds — no push (after all above) |
-| **Summary** | Markdown table of all job results |
-
-### Pipeline Graph
-
-```
-format ──┐
-         ├──> type-check ──┐
-lint   ──┤                  │
-         ├──> integration ──┼──> build-docker ──> summary
-         │                  │
-         └──> security   ──┘
-              
-unit-tests (independent) ──────> build-docker
-```
-
-### Local CI Simulation
-
-```bash
-black --check app/ tests/
-isort --check-only app/ tests/
-flake8 app/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E501
-pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903
-mypy app/ --ignore-missing-imports --no-strict-optional
-ALLOW_DB_FAILURE=true pytest tests/ -v
-bandit -r app/ || true
-docker build -t ouroboros-orchestrator .
-```
+| **Type Check** | mypy static analysis |
+| **Security Audit** | Bandit static security analysis |
+| **Docker Build** | Verify image builds |
+| **Summary** | Markdown table of results |
 
 ---
 
@@ -507,11 +522,13 @@ docker build -t ouroboros-orchestrator .
 ### Docker Compose (Full Stack)
 
 ```bash
-docker compose up --build -d      # start MySQL + service
-docker compose logs -f             # follow logs
-docker compose down                # stop
-docker compose down -v             # stop and remove volumes
+docker compose up --build -d
+docker compose logs -f
+docker compose down
+docker compose down -v
 ```
+
+Backend on port **8000**, MySQL on `DOCKER_MYSQL_PORT` (default **3307**).
 
 ### Docker (Service Only)
 
@@ -519,12 +536,13 @@ docker compose down -v             # stop and remove volumes
 docker build -t ouroboros-orchestrator .
 
 docker run -p 8000:8000 \
+  --env-file .env \
   -e DB_HOST=mysql-host \
   -e DB_PASSWORD=secret \
-  -e JWT_PRIVATE_KEY="..." \
-  -e JWT_PUBLIC_KEY="..." \
   ouroboros-orchestrator
 ```
+
+Ensure `.env` contains `JWT_PRIVATE_KEY`, `JWT_PUBLIC_KEY`, and Twilio variables (same escaped-PEM format as local dev). Alternatively pass `-e JWT_PRIVATE_KEY='...'` with a properly escaped single-line PEM string.
 
 ---
 
@@ -533,58 +551,47 @@ docker run -p 8000:8000 \
 ```
 ouroboros-ai-orchestrator/
 ├── app/
-│   ├── api/                     # Route handlers (thin layer)
-│   │   ├── health.py            # GET / and /health
-│   │   ├── auth.py              # POST /auth/signup, /login, /refresh, /logout, GET /me
-│   │   ├── chats.py             # Chat session CRUD
-│   │   ├── workflows.py         # Workflow orchestration
-│   │   ├── profiles.py          # Proxy → Student Profile agent
-│   │   └── dashboard.py         # Aggregated results view
-│   ├── core/                    # Infrastructure
-│   │   ├── database.py          # aiomysql async connection pool (no ORM)
-│   │   ├── logging.py           # structlog configuration
-│   │   └── security.py          # JWT RS256 create / decode
-│   ├── models/                  # Pydantic request / response schemas
-│   │   ├── common.py            # StandardResponse, PaginatedResponse
-│   │   ├── auth.py              # SignupRequest, LoginRequest, TokenResponse
-│   │   ├── chat.py              # ChatCreate, MessageCreate, ChatResponse
-│   │   ├── workflow.py          # WorkflowState, WorkflowRunResponse
-│   │   └── agent_payloads.py    # Request/response schemas for each agent
-│   ├── db/repositories/         # Raw SQL data access (aiomysql)
-│   │   ├── user_repo.py
-│   │   ├── chat_repo.py
-│   │   ├── workflow_repo.py
-│   │   └── agent_log_repo.py
-│   ├── services/                # Business logic
-│   │   ├── auth_service.py      # Signup, login, token management
-│   │   ├── chat_service.py      # Chat session orchestration
-│   │   ├── workflow_service.py  # State machine logic
-│   │   └── aggregation_service.py
-│   ├── clients/                 # HTTP clients to agent services
-│   │   ├── base_client.py       # Shared httpx client with retry
-│   │   ├── student_profile_client.py
-│   │   ├── program_discovery_client.py
-│   │   ├── scholarship_discovery_client.py
-│   │   ├── eligibility_client.py
-│   │   └── application_support_client.py
-│   ├── middleware/              # Middleware
-│   │   ├── auth_middleware.py   # JWT validation dependency
-│   │   └── logging_middleware.py
-│   ├── utils/                   # Utilities
-│   │   ├── exceptions.py        # Custom exception hierarchy
-│   │   └── trace_id.py          # UUID-v4 trace ID generation
-│   ├── config.py                # Pydantic settings
-│   └── main.py                  # FastAPI app with lifespan
-├── migrations/                  # SQL migration files (001-003)
+│   ├── api/                        # HTTP route handlers (thin — delegate to services)
+│   │   ├── auth.py                 # Auth endpoints (signup, OTP, login, profile, sessions)
+│   │   └── health.py               # GET / and /health
+│   ├── core/                       # Infrastructure with startup/shutdown lifecycle
+│   │   ├── database.py             # aiomysql async connection pool (create, close, get)
+│   │   └── logging.py              # structlog configuration (setup_logging, get_logger)
+│   ├── services/                   # Business logic (no SQL, no HTTP)
+│   │   ├── auth_service.py         # Auth orchestration (signup → OTP → login → tokens)
+│   │   └── twilio_service.py       # Twilio OTP delivery
+│   ├── models/                     # Pydantic request/response schemas
+│   │   ├── common.py               # StandardResponse, PaginatedResponse
+│   │   └── auth.py                 # Auth models with Swagger examples
+│   ├── repositories/               # Data access (raw SQL, uses pool from core)
+│   │   ├── user_repo.py            # User CRUD
+│   │   └── auth_repo.py            # Auth sessions & OTP audit logs
+│   ├── middleware/
+│   │   ├── auth_middleware.py      # JWT RS256 validation + get_current_user
+│   │   └── logging_middleware.py   # X-Trace-ID propagation
+│   ├── utils/                      # Stateless helper functions
+│   │   ├── jwt_util.py             # RS256 JWT encode/decode
+│   │   ├── password_util.py        # bcrypt hash/verify
+│   │   ├── phone_util.py           # Phone validation (E.164) and masking
+│   │   ├── otp_util.py             # OTP generation, expiry, cooldown
+│   │   ├── profile_completion.py   # When profile_completed should be true
+│   │   ├── timezone.py             # UTC normalization and ISO serialization
+│   │   ├── helpers.py              # generate_uuid, utc_now, get_current_time
+│   │   ├── utc_json_response.py    # UTC-aware JSON response class
+│   │   ├── exceptions.py           # Custom exception hierarchy
+│   │   └── trace_id.py             # UUID-v4 trace ID generation
+│   ├── config.py                   # Pydantic settings from .env
+│   └── main.py                     # FastAPI app, lifespan, middleware, OpenAPI
+├── migrations/
+│   └── 001_create_users.sql        # users + auth_sessions + otp_logs
 ├── scripts/
-│   ├── run_migrations.py        # Execute migrations in order
-│   ├── seed_test_data.py        # Seed test users
-│   └── generate_service_token.py
+│   ├── run_migrations.py           # Execute migrations in order
+│   └── seed_users.py               # Seed OuroborosAI team members
 ├── tests/
-│   ├── unit/                    # Unit tests
-│   └── integration/             # Integration tests
-├── .github/workflows/
-│   └── deploy.yml               # CI/CD pipeline
+│   ├── conftest.py                 # RSA key fixtures
+│   ├── unit/                       # Unit tests (mocked DB & Twilio)
+│   └── integration/                # Future integration tests
+├── .github/workflows/deploy.yml
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── pyproject.toml
@@ -598,61 +605,39 @@ ouroboros-ai-orchestrator/
 └── README.md
 ```
 
+### Why `app/core/`?
+
+The orchestrator uses async I/O (`aiomysql`), which means infrastructure like the database pool **must be created at startup** (via `await`) and torn down on shutdown. `app/core/` holds these lifecycle-bound resources — things that initialize before the app handles any requests and clean up when it stops. Stateless helpers live in `app/utils/`; data access lives in `app/repositories/`.
+
 ---
 
 ## Troubleshooting
 
-### Database Connection Failed
+| Issue | Fix |
+|-------|-----|
+| Can't connect to MySQL | Check MySQL is running. Verify `DB_*` in `.env`. Confirm the database exists. |
+| JWT or auth errors | Ensure `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` are set with `\n` for newlines. Regenerate with OpenSSL if needed. |
+| Twilio OTP not sending | Verify `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` in `.env`. Check Twilio console for errors. |
+| Import errors | Activate venv: `source venv/bin/activate && pip install -r requirements.txt` |
+| Port 8000 in use | Use `--port 8001` or stop the existing process. |
+| Tests fail locally | Run with `ALLOW_DB_FAILURE=true pytest tests/ -v` |
 
-**Symptom**: `RuntimeError: Database pool has not been initialised`
+---
 
-```bash
-# Check MySQL is running
-docker compose ps
+## Error Responses
 
-# Test connection
-mysql -h localhost -P 3307 -u root -p -e "SHOW DATABASES;"
+| Status | Example |
+|--------|---------|
+| **400** | `{"detail": "Invalid OTP code"}` |
+| **401** | `{"detail": "Invalid credentials"}` |
+| **403** | `{"detail": "Account is disabled"}` |
+| **404** | `{"detail": "User not found"}` |
+| **409** | `{"detail": "Phone number already registered"}` |
+| **422** | Pydantic validation errors |
+| **429** | `{"detail": "Too many OTP requests. Please try again later."}` (also MFA daily limit, password cooldowns) |
+| **500** | `{"detail": "Failed to send OTP. Please try again."}` when Twilio SMS fails (signup, resend, forgot-password, MFA login challenge) |
 
-# Verify credentials
-grep DB_ .env
-```
-
-### JWT Key Errors
-
-**Symptom**: `jwt.exceptions.DecodeError` or empty token responses
-
-```bash
-# Verify keys exist
-ls -la jwt_private.pem jwt_public.pem
-
-# Regenerate if needed
-openssl genrsa -out jwt_private.pem 2048
-openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
-
-# Verify keys match
-openssl rsa -in jwt_private.pem -pubout | diff - jwt_public.pem
-```
-
-### Import Errors
-
-**Symptom**: `ModuleNotFoundError: No module named 'app'`
-
-```bash
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Agent Service Unreachable
-
-**Symptom**: `AgentCallError: [student_profile] HTTP 502`
-
-```bash
-# Check agent service is running
-curl http://localhost:8001/health
-
-# Verify URLs in .env
-grep SERVICE_URL .env
-```
+**Note:** If signup returns **500** after Twilio fails, the user row may already exist; use **resend-otp** once SMS is working, or remove the row and sign up again during development.
 
 ---
 

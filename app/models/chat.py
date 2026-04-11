@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CreateChatRequest(BaseModel):
-    """Create a new chat, optionally with an initial message."""
+    """Create a new chat, optionally with an initial message and project assignment."""
 
     message: Optional[str] = Field(
         None,
@@ -17,6 +17,11 @@ class CreateChatRequest(BaseModel):
         max_length=10000,
         description="Optional first message to send immediately after chat creation",
         examples=["Help me find scholarships for computer science programs in Singapore"],
+    )
+    project_id: Optional[str] = Field(
+        None,
+        description="Optional project ID to assign this chat to",
+        examples=["proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
     )
 
 
@@ -41,19 +46,31 @@ class SendMessageRequest(BaseModel):
 
 
 class UpdateChatRequest(BaseModel):
-    """Update chat metadata (currently only title)."""
+    """Update chat metadata (title, starred status, project assignment)."""
 
-    title: str = Field(
-        ...,
+    title: Optional[str] = Field(
+        None,
         min_length=1,
         max_length=255,
         description="New chat title",
         examples=["My Scholarship Search"],
     )
+    is_starred: Optional[bool] = Field(
+        None,
+        description="Mark chat as starred/favorite",
+        examples=[True],
+    )
+    project_id: Optional[str] = Field(
+        None,
+        description="Project ID to move chat to (use empty string to remove from project)",
+        examples=["proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+    )
 
     @field_validator("title")
     @classmethod
-    def strip_whitespace(cls, v: str) -> str:
+    def strip_title(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
         stripped = v.strip()
         if not stripped:
             raise ValueError("Title cannot be empty or whitespace only")
@@ -85,6 +102,8 @@ class ChatResponse(BaseModel):
     id: str = Field(..., examples=["chat-a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
     title: Optional[str] = Field(None, examples=["Scholarship Search for CS Programs"])
     status: Literal["active", "archived"] = Field(..., examples=["active"])
+    is_starred: bool = Field(default=False, examples=[False])
+    project_id: Optional[str] = Field(None, examples=["proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890"])
     message_count: int = Field(..., examples=[4])
     created_at: datetime
     updated_at: datetime

@@ -11,6 +11,7 @@ from app.core.database import get_pool
 from app.core.logging import get_logger
 from app.repositories.chat_repo import ChatRepository
 from app.repositories.message_repo import MessageRepository
+from app.repositories.project_repo import ProjectRepository
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,10 @@ def _lazy_message_repo() -> MessageRepository:
     return MessageRepository(get_pool())
 
 
+def _lazy_project_repo() -> ProjectRepository:
+    return ProjectRepository(get_pool())
+
+
 class ChatService:
     """Orchestrates chat session operations."""
 
@@ -32,9 +37,11 @@ class ChatService:
         self,
         chat_repo: Optional[ChatRepository] = None,
         message_repo: Optional[MessageRepository] = None,
+        project_repo: Optional[ProjectRepository] = None,
     ) -> None:
         self._chat_repo = chat_repo
         self._message_repo = message_repo
+        self._project_repo = project_repo
 
     @property
     def chat_repo(self) -> ChatRepository:
@@ -48,27 +55,42 @@ class ChatService:
             self._message_repo = _lazy_message_repo()
         return self._message_repo
 
+    @property
+    def project_repo(self) -> ProjectRepository:
+        if self._project_repo is None:
+            self._project_repo = _lazy_project_repo()
+        return self._project_repo
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def create_chat(
         self,
         user_id: str,
         initial_message: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Create a new chat session.
 
-        If initial_message is provided:
-        1. Create chat
-        2. Store user message
-        3. Generate placeholder assistant response
-        4. Store assistant message
-        5. Set title from first 50 chars of user message
-        6. Return chat with both messages
+        If project_id is provided, validates ownership and increments chat_count.
+        If initial_message is provided, sends it and auto-generates title.
         """
+        if project_id:
+            exists = await self.project_repo.exists_for_user(project_id, user_id)
+            if not exists:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+
         chat_id = str(uuid.uuid4())
 
-        chat = await self.chat_repo.create(chat_id=chat_id, user_id=user_id, title=None)
+        chat = await self.chat_repo.create(
+            chat_id=chat_id,
+            user_id=user_id,
+            title=None,
+            project_id=project_id,
+        )
+
+        if project_id:
+            await self.project_repo.increment_chat_count(project_id, 1)
 
         if initial_message:
             result = await self.send_message(
@@ -78,7 +100,7 @@ class ChatService:
             )
             return result["chat"]
 
-        logger.info("chat_created", user_id=user_id, chat_id=chat_id, with_message=False)
+        logger.info("chat_created", user_id=user_id, chat_id=chat_id, project_id=project_id, with_message=False)
         return chat
 
     async def get_chat(self, user_id: str, chat_id: str) -> dict[str, Any]:
@@ -86,15 +108,22 @@ class ChatService:
         chat = await self._get_chat_or_404(chat_id, user_id)
         return chat
 
-    async def list_chats(
+    async def list_chats(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         user_id: str,
         limit: int = 20,
         cursor: Optional[str] = None,
+        starred: Optional[bool] = None,
+        project_id: Optional[str] = None,
+        no_project: bool = False,
     ) -> dict[str, Any]:
         """
-        List user's chats with cursor pagination.
-        Cursor is base64-encoded updated_at ISO timestamp.
+        List user's chats with cursor pagination and filters.
+
+        Filters:
+        - starred: True = only starred, False = only non-starred, None = all
+        - project_id: Filter by specific project
+        - no_project: True = only chats without a project
         """
         limit = min(max(1, limit), 100)
 
@@ -106,20 +135,25 @@ class ChatService:
             except Exception as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid cursor") from exc
 
+        if project_id:
+            exists = await self.project_repo.exists_for_user(project_id, user_id)
+            if not exists:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+
         chats, total_count = await self.chat_repo.list_by_user(
             user_id=user_id,
             limit=limit,
             cursor=cursor_dt,
+            starred_only=starred is True,
+            project_id=project_id,
+            no_project=no_project,
         )
 
         next_cursor: Optional[str] = None
         if chats and len(chats) == limit:
             last_updated = chats[-1].get("updated_at")
             if last_updated:
-                if isinstance(last_updated, datetime):
-                    cursor_str = last_updated.isoformat()
-                else:
-                    cursor_str = str(last_updated)
+                cursor_str = last_updated.isoformat() if isinstance(last_updated, datetime) else str(last_updated)
                 next_cursor = base64.b64encode(cursor_str.encode("utf-8")).decode("utf-8")
 
         return {
@@ -128,29 +162,60 @@ class ChatService:
             "total_count": total_count,
         }
 
-    async def update_chat_title(
+    async def update_chat(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         user_id: str,
         chat_id: str,
-        title: str,
+        title: Optional[str] = None,
+        is_starred: Optional[bool] = None,
+        project_id: Optional[str] = None,
+        remove_from_project: bool = False,
     ) -> dict[str, Any]:
-        """Update chat title. Validates ownership."""
-        await self._get_chat_or_404(chat_id, user_id)
+        """
+        Update chat metadata (title, starred status, project assignment).
 
-        chat = await self.chat_repo.update_title(chat_id, title)
-        if not chat:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found")
+        To remove from project, pass remove_from_project=True or project_id as empty string.
+        """
+        chat = await self._get_chat_or_404(chat_id, user_id)
+        old_project_id = chat.get("project_id")
 
-        logger.info("chat_title_updated", user_id=user_id, chat_id=chat_id)
-        return chat
+        if title is not None:
+            await self.chat_repo.update_title(chat_id, title)
+
+        if is_starred is not None:
+            await self.chat_repo.update_starred(chat_id, is_starred)
+
+        if remove_from_project or project_id == "":
+            if old_project_id:
+                await self.chat_repo.update_project(chat_id, None)
+                await self.project_repo.increment_chat_count(old_project_id, -1)
+        elif project_id is not None:
+            exists = await self.project_repo.exists_for_user(project_id, user_id)
+            if not exists:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+
+            await self.chat_repo.update_project(chat_id, project_id)
+
+            if old_project_id and old_project_id != project_id:
+                await self.project_repo.increment_chat_count(old_project_id, -1)
+            if project_id != old_project_id:
+                await self.project_repo.increment_chat_count(project_id, 1)
+
+        updated_chat = await self.chat_repo.get_by_id(chat_id)
+        logger.info("chat_updated", user_id=user_id, chat_id=chat_id)
+        return updated_chat  # type: ignore
 
     async def delete_chat(self, user_id: str, chat_id: str) -> None:
-        """Soft delete a chat. Validates ownership."""
-        await self._get_chat_or_404(chat_id, user_id)
+        """Soft delete a chat. Validates ownership. Updates project chat_count."""
+        chat = await self._get_chat_or_404(chat_id, user_id)
+        project_id = chat.get("project_id")
 
         deleted = await self.chat_repo.soft_delete(chat_id)
         if not deleted:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found")
+
+        if project_id:
+            await self.project_repo.increment_chat_count(project_id, -1)
 
         logger.info("chat_deleted", user_id=user_id, chat_id=chat_id)
 
@@ -160,16 +225,7 @@ class ChatService:
         chat_id: str,
         content: str,
     ) -> dict[str, Any]:
-        """
-        Send a user message and receive assistant response.
-
-        1. Validate chat ownership
-        2. Store user message
-        3. Generate placeholder assistant response
-        4. Store assistant message
-        5. Update chat (message_count, title if first message)
-        6. Return both messages + updated chat
-        """
+        """Send a user message and receive assistant response."""
         chat = await self._get_chat_or_404(chat_id, user_id)
 
         user_message_id = str(uuid.uuid4())
@@ -216,11 +272,7 @@ class ChatService:
         cursor: Optional[str] = None,
         order: str = "asc",
     ) -> dict[str, Any]:
-        """
-        Get message history for a chat with cursor pagination.
-        Default order is ASC (oldest first) for conversation display.
-        Cursor is base64-encoded created_at ISO timestamp.
-        """
+        """Get message history for a chat with cursor pagination."""
         await self._get_chat_or_404(chat_id, user_id)
 
         limit = min(max(1, limit), 100)
@@ -247,10 +299,7 @@ class ChatService:
         if messages and len(messages) == limit:
             last_created = messages[-1].get("created_at")
             if last_created:
-                if isinstance(last_created, datetime):
-                    cursor_str = last_created.isoformat()
-                else:
-                    cursor_str = str(last_created)
+                cursor_str = last_created.isoformat() if isinstance(last_created, datetime) else str(last_created)
                 next_cursor = base64.b64encode(cursor_str.encode("utf-8")).decode("utf-8")
 
         return {
@@ -261,10 +310,7 @@ class ChatService:
     # ── Private Helpers ───────────────────────────────────────────────────────
 
     async def _get_chat_or_404(self, chat_id: str, user_id: str) -> dict[str, Any]:
-        """
-        Get chat and validate ownership.
-        Returns 404 for both not-found and not-owned (prevents enumeration).
-        """
+        """Get chat and validate ownership."""
         chat = await self.chat_repo.get_by_id_with_user(chat_id)
 
         if not chat:
@@ -279,15 +325,7 @@ class ChatService:
         return chat
 
     def _generate_placeholder_response(self, _user_message: str) -> str:
-        """
-        Generate a placeholder assistant response.
-
-        FUTURE: This method will be replaced with:
-        1. Intent classification (what does the user want?)
-        2. Agent routing (which agent(s) should handle this?)
-        3. Agent calls (call Student Profile, Program Discovery, etc.)
-        4. Response aggregation (combine agent responses)
-        """
+        """Generate a placeholder assistant response."""
         return (
             "Thanks for your message! I'm Ouroboros, your AI assistant for discovering "
             "scholarships and programs. I'm currently being set up to help you with:\n\n"

@@ -24,6 +24,9 @@ def mock_chat_repo():
     repo.get_by_id_with_user = AsyncMock()
     repo.list_by_user = AsyncMock()
     repo.update_title = AsyncMock()
+    repo.update_starred = AsyncMock()
+    repo.update_project = AsyncMock()
+    repo.get_project_id = AsyncMock()
     repo.soft_delete = AsyncMock()
     repo.increment_message_count = AsyncMock()
     repo.set_title_if_empty = AsyncMock()
@@ -42,11 +45,25 @@ def mock_message_repo():
 
 
 @pytest.fixture
-def chat_service(mock_chat_repo, mock_message_repo):
+def mock_project_repo():
+    """Create a mock ProjectRepository."""
+    repo = MagicMock()
+    repo.create = AsyncMock()
+    repo.get_by_id = AsyncMock()
+    repo.get_by_id_with_user = AsyncMock()
+    repo.exists_for_user = AsyncMock()
+    repo.increment_chat_count = AsyncMock()
+    repo.soft_delete = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def chat_service(mock_chat_repo, mock_message_repo, mock_project_repo):
     """Create ChatService with mocked repositories."""
     return ChatService(
         chat_repo=mock_chat_repo,
         message_repo=mock_message_repo,
+        project_repo=mock_project_repo,
     )
 
 
@@ -58,6 +75,8 @@ def sample_chat():
         "user_id": "user-456",
         "title": "Test Chat",
         "status": "active",
+        "is_starred": False,
+        "project_id": None,
         "message_count": 0,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -265,9 +284,9 @@ async def test_get_chat_not_found(chat_service, mock_chat_repo):
 async def test_update_chat_title_success(chat_service, mock_chat_repo, sample_chat):
     """Test updating chat title."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
-    mock_chat_repo.update_title.return_value = {**sample_chat, "title": "New Title"}
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "title": "New Title"}
 
-    result = await chat_service.update_chat_title(
+    result = await chat_service.update_chat(
         user_id="user-456",
         chat_id="chat-123",
         title="New Title",
@@ -275,6 +294,61 @@ async def test_update_chat_title_success(chat_service, mock_chat_repo, sample_ch
 
     assert result["title"] == "New Title"
     mock_chat_repo.update_title.assert_called_once_with("chat-123", "New Title")
+
+
+@pytest.mark.asyncio
+async def test_update_chat_starred(chat_service, mock_chat_repo, sample_chat):
+    """Test starring a chat."""
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "is_starred": True}
+
+    result = await chat_service.update_chat(
+        user_id="user-456",
+        chat_id="chat-123",
+        is_starred=True,
+    )
+
+    assert result["is_starred"] is True
+    mock_chat_repo.update_starred.assert_called_once_with("chat-123", True)
+
+
+@pytest.mark.asyncio
+async def test_update_chat_move_to_project(chat_service, mock_chat_repo, mock_project_repo, sample_chat):
+    """Test moving a chat to a project."""
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_project_repo.exists_for_user.return_value = True
+    mock_chat_repo.get_by_id.return_value = {
+        **sample_chat,
+        "project_id": "proj-123",
+    }
+
+    result = await chat_service.update_chat(
+        user_id="user-456",
+        chat_id="chat-123",
+        project_id="proj-123",
+    )
+
+    assert result["project_id"] == "proj-123"
+    mock_chat_repo.update_project.assert_called_once_with("chat-123", "proj-123")
+    mock_project_repo.increment_chat_count.assert_called_once_with("proj-123", 1)
+
+
+@pytest.mark.asyncio
+async def test_update_chat_remove_from_project(chat_service, mock_chat_repo, mock_project_repo, sample_chat):
+    """Test removing a chat from a project."""
+    sample_chat_with_project = {**sample_chat, "project_id": "proj-123"}
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat_with_project
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "project_id": None}
+
+    result = await chat_service.update_chat(
+        user_id="user-456",
+        chat_id="chat-123",
+        remove_from_project=True,
+    )
+
+    assert result["project_id"] is None
+    mock_chat_repo.update_project.assert_called_once_with("chat-123", None)
+    mock_project_repo.increment_chat_count.assert_called_once_with("proj-123", -1)
 
 
 # ── Delete Chat Tests ────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from app.api import auth, chats, health
+from app.api import auth, chats, health, projects
 from app.config import APP_VERSION, settings
 from app.core.database import PoolConfig, close_pool, create_pool
 from app.core.logging import get_logger, setup_logging
@@ -76,7 +76,14 @@ app = FastAPI(
             "name": "Chats",
             "description": (
                 "Chat session management. Create conversations, send messages, "
-                "view history, and manage chat sessions."
+                "view history, star chats, and organize into projects."
+            ),
+        },
+        {
+            "name": "Projects",
+            "description": (
+                "Project management. Create folders to organize chats into groups "
+                "with custom names, colors, and icons."
             ),
         },
         {"name": "Health", "description": "System health and readiness checks."},
@@ -98,6 +105,7 @@ app.add_middleware(LoggingMiddleware)
 
 app.include_router(auth.router)
 app.include_router(chats.router)
+app.include_router(projects.router)
 app.include_router(health.router)
 
 

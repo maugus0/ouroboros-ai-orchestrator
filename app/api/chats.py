@@ -35,6 +35,14 @@ _CREATE_CHAT_EXAMPLES: dict[str, Example] = {
         ),
         value={"message": "Help me find scholarships for computer science programs in Singapore"},
     ),
+    "chat_in_project": Example(
+        summary="Create chat in a project",
+        description="Create a chat assigned to a specific project.",
+        value={
+            "message": "What master's programs are available?",
+            "project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        },
+    ),
 }
 
 _SEND_MESSAGE_EXAMPLES: dict[str, Example] = {
@@ -66,9 +74,34 @@ _UPDATE_CHAT_EXAMPLES: dict[str, Example] = {
         description="Update the chat title to something more descriptive.",
         value={"title": "My Singapore Scholarship Search"},
     ),
-    "short_title": Example(
-        summary="Short descriptive title",
-        value={"title": "CS Scholarships 2026"},
+    "star_chat": Example(
+        summary="Star a chat",
+        description="Mark a chat as starred/favorite.",
+        value={"is_starred": True},
+    ),
+    "unstar_chat": Example(
+        summary="Unstar a chat",
+        description="Remove starred status from a chat.",
+        value={"is_starred": False},
+    ),
+    "move_to_project": Example(
+        summary="Move chat to project",
+        description="Assign the chat to a project folder.",
+        value={"project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+    ),
+    "remove_from_project": Example(
+        summary="Remove chat from project",
+        description="Remove the chat from its current project (use empty string).",
+        value={"project_id": ""},
+    ),
+    "full_update": Example(
+        summary="Update multiple fields",
+        description="Update title, star status, and project in one request.",
+        value={
+            "title": "Important Research",
+            "is_starred": True,
+            "project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        },
     ),
 }
 
@@ -78,9 +111,22 @@ _CHAT_RESPONSE_EXAMPLE = {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "title": "Help me find scholarships for computer...",
     "status": "active",
+    "is_starred": False,
+    "project_id": None,
     "message_count": 2,
     "created_at": "2026-04-10T12:00:00Z",
     "updated_at": "2026-04-10T12:00:01Z",
+}
+
+_CHAT_RESPONSE_STARRED_EXAMPLE = {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "title": "Important Research",
+    "status": "active",
+    "is_starred": True,
+    "project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "message_count": 8,
+    "created_at": "2026-04-10T12:00:00Z",
+    "updated_at": "2026-04-11T09:00:00Z",
 }
 
 _SEND_MESSAGE_RESPONSE_EXAMPLE = {
@@ -112,6 +158,8 @@ _SEND_MESSAGE_RESPONSE_EXAMPLE = {
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "title": "What scholarships are available for...",
         "status": "active",
+        "is_starred": False,
+        "project_id": None,
         "message_count": 4,
         "created_at": "2026-04-10T12:00:00Z",
         "updated_at": "2026-04-10T12:05:01Z",
@@ -124,6 +172,8 @@ _PAGINATED_CHATS_RESPONSE_EXAMPLE = {
             "id": "550e8400-e29b-41d4-a716-446655440000",
             "title": "Singapore Scholarship Search",
             "status": "active",
+            "is_starred": True,
+            "project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             "message_count": 8,
             "created_at": "2026-04-10T12:00:00Z",
             "updated_at": "2026-04-10T14:30:00Z",
@@ -132,6 +182,8 @@ _PAGINATED_CHATS_RESPONSE_EXAMPLE = {
             "id": "660e8400-e29b-41d4-a716-446655440001",
             "title": "US Graduate Programs",
             "status": "active",
+            "is_starred": False,
+            "project_id": None,
             "message_count": 4,
             "created_at": "2026-04-09T10:00:00Z",
             "updated_at": "2026-04-09T11:00:00Z",
@@ -181,12 +233,13 @@ chat_service = ChatService()
             "content": {"application/json": {"example": _CHAT_RESPONSE_EXAMPLE}},
         },
         401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "Project not found (if project_id provided)"},
         422: {"description": "Validation error (message too long or invalid)"},
     },
 )
 async def create_chat(
     body: CreateChatRequest = Body(
-        default=CreateChatRequest(message=None),
+        default=CreateChatRequest(message=None, project_id=None),
         openapi_examples=_CREATE_CHAT_EXAMPLES,
     ),
     user_id: str = Depends(get_current_user_id),
@@ -194,13 +247,14 @@ async def create_chat(
     """
     Create a new chat session.
 
-    Optionally include a `message` to immediately send the first message.
-    If provided, the assistant will respond and the chat title will be
-    auto-generated from the message content.
+    Optionally:
+    - Include a `message` to immediately send the first message
+    - Include a `project_id` to assign the chat to a project
     """
     return await chat_service.create_chat(
         user_id=user_id,
         initial_message=body.message,
+        project_id=body.project_id,
     )
 
 
@@ -214,11 +268,15 @@ async def create_chat(
             "content": {"application/json": {"example": _PAGINATED_CHATS_RESPONSE_EXAMPLE}},
         },
         401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "Project not found (if project_id filter provided)"},
     },
 )
-async def list_chats(
+async def list_chats(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     limit: int = Query(20, ge=1, le=100, description="Number of chats to return"),
     cursor: Optional[str] = Query(None, description="Pagination cursor from previous response"),
+    starred: Optional[bool] = Query(None, description="Filter: true=starred only, false=unstarred only, null=all"),
+    project_id: Optional[str] = Query(None, description="Filter: only chats in this project"),
+    no_project: bool = Query(False, description="Filter: only chats not assigned to any project"),
     user_id: str = Depends(get_current_user_id),
 ):
     """
@@ -227,12 +285,19 @@ async def list_chats(
     Chats are ordered by `updated_at` descending (most recent first).
     Soft-deleted chats are excluded.
 
-    Use the `next_cursor` from the response to fetch the next page.
+    **Filters:**
+    - `starred=true` — only starred chats
+    - `starred=false` — only non-starred chats
+    - `project_id=<uuid>` — only chats in specific project
+    - `no_project=true` — only chats not in any project
     """
     return await chat_service.list_chats(
         user_id=user_id,
         limit=limit,
         cursor=cursor,
+        starred=starred,
+        project_id=project_id,
+        no_project=no_project,
     )
 
 
@@ -243,7 +308,7 @@ async def list_chats(
     responses={
         200: {
             "description": "Chat details",
-            "content": {"application/json": {"example": _CHAT_RESPONSE_EXAMPLE}},
+            "content": {"application/json": {"example": _CHAT_RESPONSE_STARRED_EXAMPLE}},
         },
         401: {"description": "Missing or invalid Bearer token"},
         404: {"description": "Chat not found or belongs to another user"},
@@ -264,14 +329,14 @@ async def get_chat(
 @router.patch(
     "/{chat_id}",
     response_model=ChatResponse,
-    summary="Update chat title",
+    summary="Update chat",
     responses={
         200: {
-            "description": "Chat updated with new title",
-            "content": {"application/json": {"example": _CHAT_RESPONSE_EXAMPLE}},
+            "description": "Chat updated",
+            "content": {"application/json": {"example": _CHAT_RESPONSE_STARRED_EXAMPLE}},
         },
         401: {"description": "Missing or invalid Bearer token"},
-        404: {"description": "Chat not found or belongs to another user"},
+        404: {"description": "Chat or project not found"},
         422: {"description": "Validation error (title empty or too long)"},
     },
 )
@@ -283,12 +348,20 @@ async def update_chat(
     """
     Update chat metadata.
 
-    Currently only `title` can be updated.
+    **Fields:**
+    - `title` — rename the chat
+    - `is_starred` — mark as favorite (true/false)
+    - `project_id` — move to a project (UUID) or remove from project (empty string "")
+
+    Only provided fields are updated; others remain unchanged.
     """
-    return await chat_service.update_chat_title(
+    return await chat_service.update_chat(
         user_id=user_id,
         chat_id=chat_id,
         title=body.title,
+        is_starred=body.is_starred,
+        project_id=body.project_id if body.project_id != "" else None,
+        remove_from_project=body.project_id == "",
     )
 
 
@@ -311,6 +384,7 @@ async def delete_chat(
 
     The chat is marked as deleted and excluded from list results.
     Messages are retained for potential future recovery.
+    Project chat_count is decremented if chat was in a project.
     """
     await chat_service.delete_chat(user_id=user_id, chat_id=chat_id)
 

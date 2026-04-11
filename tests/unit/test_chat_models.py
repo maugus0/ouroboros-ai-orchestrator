@@ -104,10 +104,22 @@ def test_create_chat_message_too_long_fails():
         CreateChatRequest(message="x" * 10001)
 
 
-def test_create_chat_message_empty_string_fails():
-    """Test that empty string message fails validation."""
-    with pytest.raises(ValidationError):
-        CreateChatRequest(message="")
+def test_create_chat_message_empty_string_coerces_to_none():
+    """Test that empty string message is coerced to None."""
+    req = CreateChatRequest(message="")
+    assert req.message is None
+
+
+def test_create_chat_message_whitespace_only_coerces_to_none():
+    """Test that whitespace-only message is coerced to None."""
+    req = CreateChatRequest(message="   ")
+    assert req.message is None
+
+
+def test_create_chat_message_strips_whitespace():
+    """Test that message whitespace is stripped."""
+    req = CreateChatRequest(message="  Hello  ")
+    assert req.message == "Hello"
 
 
 def test_create_chat_with_none_message():

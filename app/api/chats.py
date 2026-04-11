@@ -441,7 +441,10 @@ async def send_message(
 async def get_messages(
     chat_id: str = Path(..., description="Chat UUID"),
     limit: int = Query(50, ge=1, le=100, description="Number of messages to return"),
-    cursor: Optional[str] = Query(None, description="Pagination cursor from previous response"),
+    cursor: Optional[str] = Query(
+        None,
+        description="Pagination cursor from previous response (base64 JSON with timestamp and message ID)",
+    ),
     order: str = Query("asc", pattern="^(asc|desc)$", description="Sort order: asc (oldest first) or desc"),
     user_id: str = Depends(get_current_user_id),
 ):
@@ -450,6 +453,11 @@ async def get_messages(
 
     Default order is `asc` (oldest first) for natural conversation display.
     Use `desc` to get newest messages first.
+
+    **Cursor Format:**
+    The cursor is a base64-encoded JSON object `{"t": "<ISO timestamp>", "id": "<message-uuid>"}`
+    that includes both timestamp and message ID for stable pagination even when messages
+    share the same timestamp.
 
     Use the `next_cursor` from the response to fetch the next page.
     """

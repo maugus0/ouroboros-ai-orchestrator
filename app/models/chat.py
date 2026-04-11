@@ -13,7 +13,6 @@ class CreateChatRequest(BaseModel):
 
     message: Optional[str] = Field(
         None,
-        min_length=1,
         max_length=10000,
         description="Optional first message to send immediately after chat creation",
         examples=["Help me find scholarships for computer science programs in Singapore"],
@@ -23,6 +22,17 @@ class CreateChatRequest(BaseModel):
         description="Optional project ID to assign this chat to",
         examples=["proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
     )
+
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, v: Optional[str]) -> Optional[str]:
+        """Strip whitespace; coerce whitespace-only to None."""
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            return None
+        return stripped
 
 
 class SendMessageRequest(BaseModel):
@@ -146,5 +156,5 @@ class PaginatedMessagesResponse(BaseModel):
     messages: list[MessageResponse]
     next_cursor: Optional[str] = Field(
         None,
-        description="Cursor for next page (base64-encoded created_at timestamp)",
+        description='Cursor for next page (base64-encoded JSON: {"t": "ISO timestamp", "id": "message-uuid"})',
     )

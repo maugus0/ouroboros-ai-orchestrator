@@ -37,7 +37,7 @@ class ChatRepository:
         """Create a new chat session."""
         query = """
             INSERT INTO chats (id, user_id, title, status, is_starred, project_id, message_count, created_at, updated_at)
-            VALUES (%s, %s, %s, 'active', FALSE, %s, 0, UTC_TIMESTAMP(), UTC_TIMESTAMP())
+            VALUES (%s, %s, %s, 'active', FALSE, %s, 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -75,7 +75,7 @@ class ChatRepository:
         user_id: str,
         limit: int = 20,
         cursor: Optional[datetime] = None,
-        starred_only: bool = False,
+        starred: Optional[bool] = None,
         project_id: Optional[str] = None,
         no_project: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
@@ -84,15 +84,17 @@ class ChatRepository:
         Returns (chats, total_count).
 
         Filters:
-        - starred_only: Only return starred chats
+        - starred: True = only starred, False = only non-starred, None = all
         - project_id: Only return chats in this project
         - no_project: Only return chats not assigned to any project
         """
         where_clauses = ["user_id = %s", "deleted_at IS NULL"]
         count_params: list[Any] = [user_id]
 
-        if starred_only:
+        if starred is True:
             where_clauses.append("is_starred = TRUE")
+        elif starred is False:
+            where_clauses.append("is_starred = FALSE")
 
         if project_id:
             where_clauses.append("project_id = %s")
@@ -137,7 +139,7 @@ class ChatRepository:
         """Update chat title."""
         query = """
             UPDATE chats
-            SET title = %s, updated_at = UTC_TIMESTAMP()
+            SET title = %s, updated_at = UTC_TIMESTAMP(6)
             WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:
@@ -154,7 +156,7 @@ class ChatRepository:
         """Update chat starred status."""
         query = """
             UPDATE chats
-            SET is_starred = %s, updated_at = UTC_TIMESTAMP()
+            SET is_starred = %s, updated_at = UTC_TIMESTAMP(6)
             WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:
@@ -171,7 +173,7 @@ class ChatRepository:
         """Update chat project assignment. Pass None to remove from project."""
         query = """
             UPDATE chats
-            SET project_id = %s, updated_at = UTC_TIMESTAMP()
+            SET project_id = %s, updated_at = UTC_TIMESTAMP(6)
             WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:
@@ -194,11 +196,11 @@ class ChatRepository:
                 return row["project_id"] if row else None
 
     async def increment_message_count(self, chat_id: str, increment: int = 1) -> None:
-        """Increment message_count and touch updated_at."""
+        """Increment message_count and touch updated_at. Clamps at zero, skips deleted chats."""
         query = """
             UPDATE chats
-            SET message_count = message_count + %s, updated_at = UTC_TIMESTAMP()
-            WHERE id = %s
+            SET message_count = GREATEST(0, message_count + %s), updated_at = UTC_TIMESTAMP(6)
+            WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -209,13 +211,34 @@ class ChatRepository:
         """Set title only if currently NULL (for auto-title from first message)."""
         query = """
             UPDATE chats
-            SET title = %s, updated_at = UTC_TIMESTAMP()
-            WHERE id = %s AND title IS NULL
+            SET title = %s, updated_at = UTC_TIMESTAMP(6)
+            WHERE id = %s AND title IS NULL AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, (title, chat_id))
                 await conn.commit()
+
+    async def unassign_from_project(self, project_id: str) -> int:
+        """
+        Remove all chats from a project (set project_id to NULL).
+        Called when a project is soft-deleted.
+        Returns the number of chats unassigned.
+        """
+        query = """
+            UPDATE chats
+            SET project_id = NULL, updated_at = UTC_TIMESTAMP(6)
+            WHERE project_id = %s AND deleted_at IS NULL
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (project_id,))
+                await conn.commit()
+                count = cur.rowcount
+
+        if count > 0:
+            logger.info("chats_unassigned_from_project", project_id=project_id, count=count)
+        return count
 
     # ── Delete ────────────────────────────────────────────────────────────────
 
@@ -223,7 +246,7 @@ class ChatRepository:
         """Soft delete a chat (set deleted_at). Returns True if deleted."""
         query = """
             UPDATE chats
-            SET deleted_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
+            SET deleted_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6)
             WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:

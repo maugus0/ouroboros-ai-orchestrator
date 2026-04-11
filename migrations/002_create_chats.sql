@@ -7,6 +7,9 @@
 -- store UTC; the frontend converts to the user's local timezone for display.
 --
 -- Soft delete: chats and projects use deleted_at column; messages are retained for recovery.
+--
+-- Timestamp precision: Uses DATETIME(6) for microsecond precision to support stable
+-- cursor pagination when multiple records are created in quick succession.
 
 -- ============================================================================
 -- PROJECTS TABLE (must be created before chats due to FK reference)
@@ -22,9 +25,9 @@ CREATE TABLE IF NOT EXISTS projects (
     color           VARCHAR(7)   DEFAULT NULL COMMENT 'Hex color code for UI (e.g., #3B82F6)',
     icon            VARCHAR(50)  DEFAULT NULL COMMENT 'Icon identifier for UI (e.g., folder, briefcase)',
     chat_count      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Denormalized for list view',
-    created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    deleted_at      DATETIME     DEFAULT NULL COMMENT 'Soft delete marker',
+    created_at      DATETIME(6)  DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at      DATETIME(6)  DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    deleted_at      DATETIME(6)  DEFAULT NULL COMMENT 'Soft delete marker',
 
     INDEX idx_projects_user_active (user_id, deleted_at, updated_at DESC),
     INDEX idx_projects_name (user_id, name),
@@ -48,9 +51,9 @@ CREATE TABLE IF NOT EXISTS chats (
     is_starred      BOOLEAN      NOT NULL DEFAULT FALSE COMMENT 'User-marked as favorite',
     project_id      VARCHAR(36)  DEFAULT NULL COMMENT 'FK to projects.id (optional)',
     message_count   INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Denormalized for list view',
-    created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    deleted_at      DATETIME     DEFAULT NULL COMMENT 'Soft delete marker',
+    created_at      DATETIME(6)  DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at      DATETIME(6)  DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    deleted_at      DATETIME(6)  DEFAULT NULL COMMENT 'Soft delete marker',
 
     INDEX idx_chats_user_active  (user_id, deleted_at, updated_at DESC),
     INDEX idx_chats_updated      (updated_at DESC),
@@ -67,6 +70,7 @@ CREATE TABLE IF NOT EXISTS chats (
 -- ============================================================================
 -- Messages within a chat. Role indicates sender (user, assistant, system).
 -- metadata JSON stores future agent routing info, token counts, latency.
+-- Uses (created_at, id) for stable cursor pagination with microsecond precision.
 
 CREATE TABLE IF NOT EXISTS messages (
     id          VARCHAR(36)  PRIMARY KEY COMMENT 'UUID v4',
@@ -74,9 +78,9 @@ CREATE TABLE IF NOT EXISTS messages (
     role        ENUM('user', 'assistant', 'system') NOT NULL,
     content     TEXT         NOT NULL,
     metadata    JSON         DEFAULT NULL COMMENT 'Future: agent_ids, routing_decision, token_count, latency_ms',
-    created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    created_at  DATETIME(6)  DEFAULT CURRENT_TIMESTAMP(6),
 
-    INDEX idx_messages_chat_created (chat_id, created_at ASC),
+    INDEX idx_messages_chat_created (chat_id, created_at ASC, id ASC),
     INDEX idx_messages_chat_id      (chat_id),
 
     FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE

@@ -24,8 +24,16 @@ def mock_project_repo():
 
 
 @pytest.fixture
-def project_service(mock_project_repo):
-    return ProjectService(project_repo=mock_project_repo)
+def mock_chat_repo():
+    """Create a mock ChatRepository for project deletion tests."""
+    repo = MagicMock()
+    repo.unassign_from_project = AsyncMock()
+    return repo
+
+
+@pytest.fixture
+def project_service(mock_project_repo, mock_chat_repo):
+    return ProjectService(project_repo=mock_project_repo, chat_repo=mock_chat_repo)
 
 
 @pytest.fixture
@@ -171,18 +179,35 @@ async def test_update_project(project_service, mock_project_repo, sample_project
 
 
 @pytest.mark.asyncio
-async def test_delete_project(project_service, mock_project_repo, sample_project):
+async def test_delete_project(project_service, mock_project_repo, mock_chat_repo, sample_project):
+    """Test that deleting a project unassigns all chats first."""
     mock_project_repo.get_by_id_with_user.return_value = sample_project
+    mock_chat_repo.unassign_from_project.return_value = 3
     mock_project_repo.soft_delete.return_value = True
 
     await project_service.delete_project(user_id="user-456", project_id="proj-123")
 
+    mock_chat_repo.unassign_from_project.assert_called_once_with("proj-123")
     mock_project_repo.soft_delete.assert_called_once_with("proj-123")
 
 
 @pytest.mark.asyncio
-async def test_delete_project_not_found(project_service, mock_project_repo, sample_project):
+async def test_delete_project_unassigns_chats(project_service, mock_project_repo, mock_chat_repo, sample_project):
+    """Test that delete_project calls unassign_from_project before soft_delete."""
     mock_project_repo.get_by_id_with_user.return_value = sample_project
+    mock_chat_repo.unassign_from_project.return_value = 5
+    mock_project_repo.soft_delete.return_value = True
+
+    await project_service.delete_project(user_id="user-456", project_id="proj-123")
+
+    mock_chat_repo.unassign_from_project.assert_called_once_with("proj-123")
+    mock_project_repo.soft_delete.assert_called_once_with("proj-123")
+
+
+@pytest.mark.asyncio
+async def test_delete_project_not_found(project_service, mock_project_repo, mock_chat_repo, sample_project):
+    mock_project_repo.get_by_id_with_user.return_value = sample_project
+    mock_chat_repo.unassign_from_project.return_value = 0
     mock_project_repo.soft_delete.return_value = False
 
     with pytest.raises(Exception) as exc_info:

@@ -39,7 +39,7 @@ class ProjectRepository:
         """Create a new project."""
         query = """
             INSERT INTO projects (id, user_id, name, description, color, icon, chat_count, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, 0, UTC_TIMESTAMP(), UTC_TIMESTAMP())
+            VALUES (%s, %s, %s, %s, %s, %s, 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -159,7 +159,7 @@ class ProjectRepository:
         if not updates:
             return await self.get_by_id(project_id)
 
-        updates.append("updated_at = UTC_TIMESTAMP()")
+        updates.append("updated_at = UTC_TIMESTAMP(6)")
         params.append(project_id)
 
         query = f"""
@@ -179,10 +179,10 @@ class ProjectRepository:
         return await self.get_by_id(project_id)
 
     async def increment_chat_count(self, project_id: str, increment: int = 1) -> None:
-        """Increment chat_count (use negative for decrement)."""
+        """Increment chat_count (use negative for decrement). Clamps at zero."""
         query = """
             UPDATE projects
-            SET chat_count = GREATEST(0, chat_count + %s), updated_at = UTC_TIMESTAMP()
+            SET chat_count = GREATEST(0, chat_count + %s), updated_at = UTC_TIMESTAMP(6)
             WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:
@@ -196,7 +196,7 @@ class ProjectRepository:
         """Soft delete a project. Returns True if deleted."""
         query = """
             UPDATE projects
-            SET deleted_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
+            SET deleted_at = UTC_TIMESTAMP(6), updated_at = UTC_TIMESTAMP(6)
             WHERE id = %s AND deleted_at IS NULL
         """
         async with self.pool.acquire() as conn:

@@ -1,6 +1,7 @@
 """Chat session business logic — create, send messages, list, delete."""
 
 import base64
+import json
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -144,7 +145,7 @@ class ChatService:
             user_id=user_id,
             limit=limit,
             cursor=cursor_dt,
-            starred_only=starred is True,
+            starred=starred,
             project_id=project_id,
             no_project=no_project,
         )
@@ -264,7 +265,7 @@ class ChatService:
             "chat": updated_chat,
         }
 
-    async def get_messages(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    async def get_messages(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         user_id: str,
         chat_id: str,
@@ -272,7 +273,12 @@ class ChatService:
         cursor: Optional[str] = None,
         order: str = "asc",
     ) -> dict[str, Any]:
-        """Get message history for a chat with cursor pagination."""
+        """
+        Get message history for a chat with cursor pagination.
+
+        Cursor format: base64-encoded JSON {"t": "ISO-timestamp", "id": "message-uuid"}
+        Uses (created_at, id) for stable ordering across identical timestamps.
+        """
         await self._get_chat_or_404(chat_id, user_id)
 
         limit = min(max(1, limit), 100)
@@ -280,27 +286,34 @@ class ChatService:
         if order.lower() not in ("asc", "desc"):
             order = "asc"
 
-        cursor_dt: Optional[datetime] = None
+        cursor_time: Optional[datetime] = None
+        cursor_id: Optional[str] = None
         if cursor:
             try:
                 decoded = base64.b64decode(cursor).decode("utf-8")
-                cursor_dt = datetime.fromisoformat(decoded)
+                cursor_data = json.loads(decoded)
+                cursor_time = datetime.fromisoformat(cursor_data["t"])
+                cursor_id = cursor_data["id"]
             except Exception as exc:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid cursor") from exc
 
         messages = await self.message_repo.list_by_chat(
             chat_id=chat_id,
             limit=limit,
-            cursor=cursor_dt,
+            cursor_time=cursor_time,
+            cursor_id=cursor_id,
             order=order,
         )
 
         next_cursor: Optional[str] = None
         if messages and len(messages) == limit:
-            last_created = messages[-1].get("created_at")
-            if last_created:
+            last_msg = messages[-1]
+            last_created = last_msg.get("created_at")
+            last_id = last_msg.get("id")
+            if last_created and last_id:
                 cursor_str = last_created.isoformat() if isinstance(last_created, datetime) else str(last_created)
-                next_cursor = base64.b64encode(cursor_str.encode("utf-8")).decode("utf-8")
+                cursor_data = json.dumps({"t": cursor_str, "id": last_id})
+                next_cursor = base64.b64encode(cursor_data.encode("utf-8")).decode("utf-8")
 
         return {
             "messages": messages,

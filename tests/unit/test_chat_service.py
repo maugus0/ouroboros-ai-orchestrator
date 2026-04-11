@@ -253,6 +253,49 @@ async def test_list_chats_invalid_cursor(chat_service):
     assert exc_info.value.status_code == 400
 
 
+@pytest.mark.asyncio
+async def test_list_chats_starred_true(chat_service, mock_chat_repo, sample_chat):
+    """Test listing only starred chats (starred=True filter)."""
+    starred_chat = {**sample_chat, "is_starred": True}
+    mock_chat_repo.list_by_user.return_value = ([starred_chat], 1)
+
+    result = await chat_service.list_chats(user_id="user-456", starred=True)
+
+    assert result["chats"] == [starred_chat]
+    assert result["total_count"] == 1
+    mock_chat_repo.list_by_user.assert_called_once()
+    _, call_kwargs = mock_chat_repo.list_by_user.call_args
+    assert call_kwargs["starred"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_chats_starred_false(chat_service, mock_chat_repo, sample_chat):
+    """Test listing only non-starred chats (starred=False filter)."""
+    non_starred_chat = {**sample_chat, "is_starred": False}
+    mock_chat_repo.list_by_user.return_value = ([non_starred_chat], 1)
+
+    result = await chat_service.list_chats(user_id="user-456", starred=False)
+
+    assert result["chats"] == [non_starred_chat]
+    assert result["total_count"] == 1
+    mock_chat_repo.list_by_user.assert_called_once()
+    _, call_kwargs = mock_chat_repo.list_by_user.call_args
+    assert call_kwargs["starred"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_chats_starred_none(chat_service, mock_chat_repo, sample_chat):
+    """Test listing all chats when starred=None (no filter)."""
+    mock_chat_repo.list_by_user.return_value = ([sample_chat], 1)
+
+    result = await chat_service.list_chats(user_id="user-456", starred=None)
+
+    assert result["chats"] == [sample_chat]
+    mock_chat_repo.list_by_user.assert_called_once()
+    _, call_kwargs = mock_chat_repo.list_by_user.call_args
+    assert call_kwargs["starred"] is None
+
+
 # ── Get Chat Tests ───────────────────────────────────────────────────────────
 
 

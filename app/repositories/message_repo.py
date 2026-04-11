@@ -34,7 +34,7 @@ class MessageRepository:
 
         query = """
             INSERT INTO messages (id, chat_id, role, content, metadata, created_at)
-            VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP())
+            VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP(6))
         """
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -62,53 +62,59 @@ class MessageRepository:
                     return result
                 return None
 
-    async def list_by_chat(
+    async def list_by_chat(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         chat_id: str,
         limit: int = 50,
-        cursor: Optional[datetime] = None,
+        cursor_time: Optional[datetime] = None,
+        cursor_id: Optional[str] = None,
         order: str = "asc",
     ) -> list[dict[str, Any]]:
         """
         List messages for a chat.
         Default order is ASC (oldest first) for conversation display.
-        Cursor pagination using created_at.
+
+        Cursor pagination uses (created_at, id) for stable ordering:
+        - cursor_time: The created_at of the last message from previous page
+        - cursor_id: The id of the last message from previous page (tie-breaker)
         """
         if order.lower() == "desc":
-            if cursor:
+            if cursor_time and cursor_id:
                 query = f"""
                     SELECT {_MESSAGE_COLS}
                     FROM messages
-                    WHERE chat_id = %s AND created_at < %s
-                    ORDER BY created_at DESC
+                    WHERE chat_id = %s
+                      AND (created_at < %s OR (created_at = %s AND id < %s))
+                    ORDER BY created_at DESC, id DESC
                     LIMIT %s
                 """  # nosec B608
-                params: tuple[Any, ...] = (chat_id, cursor, limit)
+                params: tuple[Any, ...] = (chat_id, cursor_time, cursor_time, cursor_id, limit)
             else:
                 query = f"""
                     SELECT {_MESSAGE_COLS}
                     FROM messages
                     WHERE chat_id = %s
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, id DESC
                     LIMIT %s
                 """  # nosec B608
                 params = (chat_id, limit)
         else:
-            if cursor:
+            if cursor_time and cursor_id:
                 query = f"""
                     SELECT {_MESSAGE_COLS}
                     FROM messages
-                    WHERE chat_id = %s AND created_at > %s
-                    ORDER BY created_at ASC
+                    WHERE chat_id = %s
+                      AND (created_at > %s OR (created_at = %s AND id > %s))
+                    ORDER BY created_at ASC, id ASC
                     LIMIT %s
                 """  # nosec B608
-                params = (chat_id, cursor, limit)
+                params = (chat_id, cursor_time, cursor_time, cursor_id, limit)
             else:
                 query = f"""
                     SELECT {_MESSAGE_COLS}
                     FROM messages
                     WHERE chat_id = %s
-                    ORDER BY created_at ASC
+                    ORDER BY created_at ASC, id ASC
                     LIMIT %s
                 """  # nosec B608
                 params = (chat_id, limit)

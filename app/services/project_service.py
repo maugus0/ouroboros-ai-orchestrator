@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 
 from app.core.database import get_pool
 from app.core.logging import get_logger
+from app.repositories.chat_repo import ChatRepository
 from app.repositories.project_repo import ProjectRepository
 
 logger = get_logger(__name__)
@@ -18,20 +19,32 @@ def _lazy_project_repo() -> ProjectRepository:
     return ProjectRepository(get_pool())
 
 
+def _lazy_chat_repo() -> ChatRepository:
+    return ChatRepository(get_pool())
+
+
 class ProjectService:
     """Orchestrates project operations."""
 
     def __init__(
         self,
         project_repo: Optional[ProjectRepository] = None,
+        chat_repo: Optional[ChatRepository] = None,
     ) -> None:
         self._project_repo = project_repo
+        self._chat_repo = chat_repo
 
     @property
     def project_repo(self) -> ProjectRepository:
         if self._project_repo is None:
             self._project_repo = _lazy_project_repo()
         return self._project_repo
+
+    @property
+    def chat_repo(self) -> ChatRepository:
+        if self._chat_repo is None:
+            self._chat_repo = _lazy_chat_repo()
+        return self._chat_repo
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -126,14 +139,26 @@ class ProjectService:
         return project
 
     async def delete_project(self, user_id: str, project_id: str) -> None:
-        """Soft delete a project. Validates ownership. Chats remain but lose project_id."""
+        """
+        Soft delete a project. Validates ownership.
+
+        Unassigns all chats from this project (sets project_id to NULL) before
+        soft-deleting to ensure chats remain accessible via other filters.
+        """
         await self._get_project_or_404(project_id, user_id)
+
+        unassigned_count = await self.chat_repo.unassign_from_project(project_id)
 
         deleted = await self.project_repo.soft_delete(project_id)
         if not deleted:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
 
-        logger.info("project_deleted", user_id=user_id, project_id=project_id)
+        logger.info(
+            "project_deleted",
+            user_id=user_id,
+            project_id=project_id,
+            chats_unassigned=unassigned_count,
+        )
 
     # ── Private Helpers ───────────────────────────────────────────────────────
 

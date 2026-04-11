@@ -684,6 +684,15 @@ All list endpoints use **cursor-based pagination**:
 - `cursor`: Pass `next_cursor` from previous response to get next page
 - `order`: For messages only — `asc` (oldest first, default) or `desc` (newest first)
 
+**Cursor Format:**
+
+- **Chats/Projects**: Base64-encoded ISO timestamp of last item's `updated_at`
+- **Messages**: Base64-encoded JSON with `{"t": "<ISO timestamp>", "id": "<message-uuid>"}` for stable ordering
+
+**Timestamp Precision:**
+
+The database uses `DATETIME(6)` (microsecond precision) to prevent duplicate timestamps when creating multiple records in quick succession. Message ordering uses `(created_at, id)` as a composite key to guarantee deterministic pagination even when timestamps collide.
+
 ### Auto-Generated Titles
 
 When sending the first message to a chat, the title is automatically set from the message content (first 50 characters, truncated at word boundary with "...").

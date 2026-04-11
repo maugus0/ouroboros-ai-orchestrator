@@ -33,7 +33,10 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 3. **Supports login** by phone number or username + password
 4. **Manages user profiles** with a completion flow (gender, email, about me, profession, interest)
 5. **Tracks sessions** with active-device visibility and duration metrics
-6. **Exposes a health endpoint** for monitoring and readiness checks
+6. **Manages chat sessions** for scholarship discovery conversations with message history
+7. **Organizes chats into projects** — user-defined folders for grouping related conversations
+8. **Supports starred chats** — mark important conversations for quick access
+9. **Exposes a health endpoint** for monitoring and readiness checks
 
 **Key Design Principles:**
 
@@ -68,6 +71,8 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 │  │  PATCH /auth/profile                        │     │
 │  │  GET  /auth/sessions                        │     │
 │  │  POST /auth/mfa/toggle, /auth/mfa/verify   │     │
+│  │  POST /api/v1/chats, GET /api/v1/chats     │     │
+│  │  POST /api/v1/chats/{id}/messages          │     │
 │  │  GET  / and /health                         │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
@@ -76,12 +81,13 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
-│  │  Service Layer (auth_service, twilio_service)│     │
+│  │  Service Layer (auth, twilio, chat, project) │     │
 │  └─────────────────────┬───────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
 │  │  Repository Layer (raw SQL / aiomysql)       │     │
-│  │  UserRepository, AuthRepository             │     │
+│  │  UserRepo, AuthRepo, ChatRepo, MessageRepo  │     │
+│  │  ProjectRepo                                 │     │
 │  └─────────────────────────────────────────────┘     │
 │                        │                             │
 │  ┌─────────────────────▼───────────────────────┐     │
@@ -269,6 +275,9 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 | `users` | User accounts: phone-based auth, OTP fields, profile data (first/last name, gender, email, profession, interest) |
 | `auth_sessions` | JWT session tracking — one row per login. Tracks `last_active_at` and `revoked_at` for session duration |
 | `otp_logs` | Audit trail for OTP events with context (signup/mfa/forgot_password) for per-flow rate limits |
+| `projects` | User-defined folders for organizing chats. Has name, description, color, icon, and chat_count |
+| `chats` | Chat sessions — one per conversation. Tracks title, is_starred, project_id, message_count, soft-delete via `deleted_at` |
+| `messages` | Messages within chats. Role: `user`, `assistant`, or `system`. JSON metadata for future agent routing |
 
 ### Users Table
 
@@ -305,12 +314,56 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 | `user_agent` | TEXT | Client user-agent at login |
 | `ip_address` | VARCHAR(50) | Client IP at session creation |
 
+### Projects Table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | VARCHAR(36) | UUID v4 primary key |
+| `user_id` | VARCHAR(36) | FK → users.id (CASCADE delete) |
+| `name` | VARCHAR(100) | Project name (required) |
+| `description` | TEXT | Optional project description |
+| `color` | VARCHAR(7) | Hex color code for UI (e.g., `#3B82F6`) |
+| `icon` | VARCHAR(50) | Icon identifier for UI (e.g., `folder`, `briefcase`) |
+| `chat_count` | INT | Denormalized count of chats in this project |
+| `created_at` | DATETIME | Project creation time (UTC) |
+| `updated_at` | DATETIME | Last activity (UTC) |
+| `deleted_at` | DATETIME | Soft delete marker |
+
+### Chats Table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | VARCHAR(36) | UUID v4 primary key |
+| `user_id` | VARCHAR(36) | FK → users.id (CASCADE delete) |
+| `title` | VARCHAR(255) | Auto-generated from first message or user-set |
+| `status` | ENUM | `active` or `archived` |
+| `is_starred` | BOOLEAN | User-marked as favorite (default `false`) |
+| `project_id` | VARCHAR(36) | FK → projects.id (SET NULL on project delete) |
+| `message_count` | INT | Denormalized count for list view performance |
+| `created_at` | DATETIME | Chat creation time (UTC) |
+| `updated_at` | DATETIME | Last activity (UTC) |
+| `deleted_at` | DATETIME | Soft delete marker |
+
+### Messages Table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | VARCHAR(36) | UUID v4 primary key |
+| `chat_id` | VARCHAR(36) | FK → chats.id (CASCADE delete) |
+| `role` | ENUM | `user`, `assistant`, or `system` |
+| `content` | TEXT | Message content |
+| `metadata` | JSON | Future: agent_ids, routing_decision, token_count, latency_ms |
+| `created_at` | DATETIME | Message timestamp (UTC) |
+
 ### Migrations
 
 ```
 migrations/
-└── 001_create_users.sql   # users + auth_sessions + otp_logs
+├── 001_create_users.sql   # users + auth_sessions + otp_logs
+└── 002_create_chats.sql   # projects + chats + messages
 ```
+
+All migrations are **idempotent** using `CREATE TABLE IF NOT EXISTS` — safe to re-run.
 
 ---
 
@@ -337,6 +390,28 @@ migrations/
 | POST | `/auth/forgot-password` | Public | Request OTP for password reset (1/week limit) |
 | POST | `/auth/forgot-password/verify` | Public | Verify OTP and set new password |
 | POST | `/auth/reset-password` | Bearer | Change password with current password (1/month limit) |
+
+### Chat Sessions (`/api/v1/chats`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/v1/chats` | Bearer | Create new chat (optionally with message and/or project) |
+| GET | `/api/v1/chats` | Bearer | List user's chats (paginated, filterable by starred/project) |
+| GET | `/api/v1/chats/{id}` | Bearer | Get single chat by ID |
+| PATCH | `/api/v1/chats/{id}` | Bearer | Update chat (title, is_starred, project_id) |
+| DELETE | `/api/v1/chats/{id}` | Bearer | Soft-delete chat |
+| POST | `/api/v1/chats/{id}/messages` | Bearer | Send message and get assistant response |
+| GET | `/api/v1/chats/{id}/messages` | Bearer | Get message history (paginated) |
+
+### Projects (`/api/v1/projects`)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/v1/projects` | Bearer | Create new project |
+| GET | `/api/v1/projects` | Bearer | List user's projects (paginated) |
+| GET | `/api/v1/projects/{id}` | Bearer | Get single project by ID |
+| PATCH | `/api/v1/projects/{id}` | Bearer | Update project (name, description, color, icon) |
+| DELETE | `/api/v1/projects/{id}` | Bearer | Soft-delete project (chats remain, unassigned) |
 
 ### Health
 
@@ -429,6 +504,209 @@ Each login creates a row in `auth_sessions`. The `last_active_at` column is upda
 
 ---
 
+## Chat Flow
+
+### Create Chat → Send Messages → Get History
+
+```
+1. POST /api/v1/chats
+   Body: {}
+   Body: { "message": "Help me find scholarships" }
+   Body: { "message": "...", "project_id": "proj-uuid" }
+   → Returns ChatResponse (if message provided, also creates user + assistant messages)
+
+2. POST /api/v1/chats/{id}/messages
+   Body: { "content": "What scholarships are available for international students?" }
+   → Returns SendMessageResponse with user_message, assistant_message, and updated chat
+
+3. GET /api/v1/chats/{id}/messages?limit=50&order=asc
+   → Returns PaginatedMessagesResponse with messages array and next_cursor
+```
+
+### Chat Filters
+
+List chats with optional filters:
+
+```
+GET /api/v1/chats                           # All chats
+GET /api/v1/chats?starred=true              # Only starred chats
+GET /api/v1/chats?starred=false             # Only non-starred chats
+GET /api/v1/chats?project_id=proj-uuid      # Chats in specific project
+GET /api/v1/chats?no_project=true           # Chats not in any project
+```
+
+### Star and Organize Chats
+
+```
+PATCH /api/v1/chats/{id}
+Body: { "is_starred": true }                # Star a chat
+Body: { "is_starred": false }               # Unstar a chat
+Body: { "project_id": "proj-uuid" }         # Move to project
+Body: { "project_id": "" }                  # Remove from project
+Body: { "title": "New Title", "is_starred": true, "project_id": "proj-uuid" }  # Update multiple
+```
+
+### Chat Response Types
+
+**ChatResponse** (returned by create, get, update):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "Scholarship Search for CS Programs",
+  "status": "active",
+  "is_starred": true,
+  "project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message_count": 4,
+  "created_at": "2026-04-10T12:00:00Z",
+  "updated_at": "2026-04-10T12:05:00Z"
+}
+```
+
+**SendMessageResponse** (returned by send message):
+```json
+{
+  "user_message": {
+    "id": "msg-user-123",
+    "chat_id": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "user",
+    "content": "What scholarships are available?",
+    "metadata": null,
+    "created_at": "2026-04-10T12:05:00Z"
+  },
+  "assistant_message": {
+    "id": "msg-asst-456",
+    "chat_id": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "assistant",
+    "content": "Thanks for your message! I'm Ouroboros...",
+    "metadata": null,
+    "created_at": "2026-04-10T12:05:01Z"
+  },
+  "chat": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "title": "What scholarships are available?",
+    "status": "active",
+    "is_starred": false,
+    "project_id": null,
+    "message_count": 2,
+    "created_at": "2026-04-10T12:00:00Z",
+    "updated_at": "2026-04-10T12:05:01Z"
+  }
+}
+```
+
+**PaginatedChatsResponse** (returned by list chats):
+```json
+{
+  "chats": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "title": "Singapore Scholarship Search",
+      "status": "active",
+      "is_starred": true,
+      "project_id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "message_count": 8,
+      "created_at": "2026-04-10T12:00:00Z",
+      "updated_at": "2026-04-10T14:30:00Z"
+    }
+  ],
+  "next_cursor": "MjAyNi0wNC0xMFQxMjowMDowMFo=",
+  "total_count": 15
+}
+```
+
+---
+
+## Project Flow
+
+### Create Project → Organize Chats
+
+```
+1. POST /api/v1/projects
+   Body: { "name": "Singapore Scholarships" }
+   Body: { "name": "...", "description": "...", "color": "#3B82F6", "icon": "folder" }
+   → Returns ProjectResponse
+
+2. PATCH /api/v1/chats/{chat_id}
+   Body: { "project_id": "proj-uuid" }
+   → Moves chat to project, updates chat_count
+
+3. GET /api/v1/chats?project_id=proj-uuid
+   → Lists all chats in the project
+```
+
+### Project Response Types
+
+**ProjectResponse** (returned by create, get, update):
+```json
+{
+  "id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "Singapore Scholarships",
+  "description": "Research on scholarship opportunities in Singapore",
+  "color": "#3B82F6",
+  "icon": "graduation-cap",
+  "chat_count": 5,
+  "created_at": "2026-04-10T12:00:00Z",
+  "updated_at": "2026-04-10T14:30:00Z"
+}
+```
+
+**PaginatedProjectsResponse** (returned by list projects):
+```json
+{
+  "projects": [
+    {
+      "id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Singapore Scholarships",
+      "description": "Research on Singapore opportunities",
+      "color": "#3B82F6",
+      "icon": "graduation-cap",
+      "chat_count": 5,
+      "created_at": "2026-04-10T12:00:00Z",
+      "updated_at": "2026-04-10T14:30:00Z"
+    }
+  ],
+  "next_cursor": "MjAyNi0wNC0wOVQxMTowMDowMFo=",
+  "total_count": 8
+}
+```
+
+### Project Deletion
+
+`DELETE /api/v1/projects/{id}` soft-deletes the project. **Chats remain** but lose their project assignment (project_id set to NULL). Chat counts are automatically maintained.
+
+---
+
+## Pagination
+
+All list endpoints use **cursor-based pagination**:
+
+- `limit`: Number of items to return (1-100, default 20 for chats, 50 for messages/projects)
+- `cursor`: Pass `next_cursor` from previous response to get next page
+- `order`: For messages only — `asc` (oldest first, default) or `desc` (newest first)
+
+**Cursor Format:**
+
+- **Chats/Projects**: Base64-encoded ISO timestamp of last item's `updated_at`
+- **Messages**: Base64-encoded JSON with `{"t": "<ISO timestamp>", "id": "<message-uuid>"}` for stable ordering
+
+**Timestamp Precision:**
+
+The database uses `DATETIME(6)` (microsecond precision) to prevent duplicate timestamps when creating multiple records in quick succession. Message ordering uses `(created_at, id)` as a composite key to guarantee deterministic pagination even when timestamps collide.
+
+### Auto-Generated Titles
+
+When sending the first message to a chat, the title is automatically set from the message content (first 50 characters, truncated at word boundary with "...").
+
+### Soft Delete
+
+`DELETE /api/v1/chats/{id}` and `DELETE /api/v1/projects/{id}` set `deleted_at` timestamp. Deleted items are excluded from list results but retained for potential recovery.
+
+### Ownership Validation
+
+All chat and project endpoints validate that the authenticated user owns the resource. Returns **404** (not 403) for both not-found and not-owned to prevent user enumeration.
+
+---
+
 ## Development Workflow
 
 ### Code Quality Checks
@@ -487,6 +765,10 @@ tests/
 ├── conftest.py                     # RSA key generation, shared fixtures
 ├── unit/
 │   ├── test_auth_service.py        # Signup, OTP, login, MFA, logout (mocked)
+│   ├── test_chat_service.py        # Chat CRUD, messages, starred, project (mocked)
+│   ├── test_chat_models.py         # Chat/message Pydantic model validation
+│   ├── test_project_service.py     # Project CRUD (mocked)
+│   ├── test_project_models.py      # Project Pydantic model validation
 │   ├── test_jwt_util.py            # Token generation and validation
 │   ├── test_password_util.py       # bcrypt hash/verify
 │   ├── test_phone_util.py          # Phone validation and masking
@@ -553,19 +835,28 @@ ouroboros-ai-orchestrator/
 ├── app/
 │   ├── api/                        # HTTP route handlers (thin — delegate to services)
 │   │   ├── auth.py                 # Auth endpoints (signup, OTP, login, profile, sessions)
+│   │   ├── chats.py                # Chat endpoints (CRUD, messages, starred, project)
+│   │   ├── projects.py             # Project endpoints (CRUD)
 │   │   └── health.py               # GET / and /health
 │   ├── core/                       # Infrastructure with startup/shutdown lifecycle
 │   │   ├── database.py             # aiomysql async connection pool (create, close, get)
 │   │   └── logging.py              # structlog configuration (setup_logging, get_logger)
 │   ├── services/                   # Business logic (no SQL, no HTTP)
 │   │   ├── auth_service.py         # Auth orchestration (signup → OTP → login → tokens)
+│   │   ├── chat_service.py         # Chat CRUD, message handling, starred, project assignment
+│   │   ├── project_service.py      # Project CRUD, chat count management
 │   │   └── twilio_service.py       # Twilio OTP delivery
 │   ├── models/                     # Pydantic request/response schemas
 │   │   ├── common.py               # StandardResponse, PaginatedResponse
-│   │   └── auth.py                 # Auth models with Swagger examples
+│   │   ├── auth.py                 # Auth models with Swagger examples
+│   │   ├── chat.py                 # Chat/message models with Swagger examples
+│   │   └── project.py              # Project models with Swagger examples
 │   ├── repositories/               # Data access (raw SQL, uses pool from core)
 │   │   ├── user_repo.py            # User CRUD
-│   │   └── auth_repo.py            # Auth sessions & OTP audit logs
+│   │   ├── auth_repo.py            # Auth sessions & OTP audit logs
+│   │   ├── chat_repo.py            # Chat CRUD (soft delete, starred, project, pagination)
+│   │   ├── message_repo.py         # Message CRUD (pagination by chat)
+│   │   └── project_repo.py         # Project CRUD (soft delete, pagination)
 │   ├── middleware/
 │   │   ├── auth_middleware.py      # JWT RS256 validation + get_current_user
 │   │   └── logging_middleware.py   # X-Trace-ID propagation

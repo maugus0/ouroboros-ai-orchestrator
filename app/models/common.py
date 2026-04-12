@@ -1,6 +1,6 @@
 """Shared Pydantic models used across the application."""
 
-from typing import Generic, TypeVar
+from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -12,7 +12,7 @@ class StandardResponse(BaseModel, Generic[T]):
 
     success: bool = True
     message: str = "OK"
-    data: T | None = None
+    data: Optional[T] = None
 
 
 class ErrorResponse(BaseModel):
@@ -20,7 +20,7 @@ class ErrorResponse(BaseModel):
 
     success: bool = False
     message: str
-    detail: str | None = None
+    detail: Optional[str] = None
 
 
 class PaginationParams(BaseModel):

@@ -1,6 +1,7 @@
 """Trace ID generation for distributed request tracing across agent services."""
 
 import uuid
+from typing import Optional
 
 import structlog
 
@@ -10,7 +11,7 @@ def generate_trace_id() -> str:
     return str(uuid.uuid4())
 
 
-def bind_trace_id(trace_id: str | None = None) -> str:
+def bind_trace_id(trace_id: Optional[str] = None) -> str:
     """Bind a trace ID to the structlog context so every log line includes it."""
     tid = trace_id or generate_trace_id()
     structlog.contextvars.bind_contextvars(trace_id=tid)

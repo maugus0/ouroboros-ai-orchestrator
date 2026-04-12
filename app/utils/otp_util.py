@@ -2,12 +2,12 @@
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Tuple
+from typing import Optional, Tuple
 
 from app.config import settings
 
 
-def generate_otp(length: int | None = None) -> str:
+def generate_otp(length: Optional[int] = None) -> str:
     """Return a cryptographically-secure numeric OTP."""
     n = length or settings.OTP_LENGTH
     return "".join(secrets.choice("0123456789") for _ in range(n))
@@ -18,7 +18,7 @@ def get_otp_expiry() -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=settings.OTP_EXPIRY_SECONDS)
 
 
-def is_otp_expired(expires_at: datetime | None) -> bool:
+def is_otp_expired(expires_at: Optional[datetime]) -> bool:
     """True when the OTP is past its expiry (or ``expires_at`` is None)."""
     if expires_at is None:
         return True
@@ -28,7 +28,7 @@ def is_otp_expired(expires_at: datetime | None) -> bool:
     return now > expires_at
 
 
-def can_request_new_otp(last_sent_at: datetime | None) -> Tuple[bool, int]:
+def can_request_new_otp(last_sent_at: Optional[datetime]) -> Tuple[bool, int]:
     """Check cooldown since the last OTP send.
 
     Returns:

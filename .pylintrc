@@ -1,0 +1,15 @@
+[MASTER]
+jobs=0
+
+[FORMAT]
+max-line-length=120
+
+[DESIGN]
+max-args=12
+max-positional-arguments=12
+max-locals=40
+max-returns=20
+max-branches=40
+max-statements=120
+max-attributes=12
+max-module-lines=1500

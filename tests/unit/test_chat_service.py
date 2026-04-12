@@ -58,12 +58,59 @@ def mock_project_repo():
 
 
 @pytest.fixture
-def chat_service(mock_chat_repo, mock_message_repo, mock_project_repo):
+def mock_profile_gate_service():
+    """Create a mock profile gate service."""
+    service = MagicMock()
+    service.evaluate_gate = AsyncMock()
+    service.collect_profile_updates_from_chat = AsyncMock()
+    return service
+
+
+@pytest.fixture
+def mock_intent_registry_service():
+    """Create a mock intent registry service."""
+    service = MagicMock()
+    service.detect_intent = MagicMock(return_value="program_discovery")
+    service.get_policy = MagicMock(return_value={"agent": "program-discovery"})
+    return service
+
+
+@pytest.fixture
+def mock_agent_availability_service():
+    """Create a mock agent availability service."""
+    service = MagicMock()
+    service.is_agent_available = AsyncMock(return_value=True)
+    return service
+
+
+@pytest.fixture
+def mock_program_discovery_client():
+    """Create a mock program discovery client."""
+    client = MagicMock()
+    client.probe_health = AsyncMock(return_value={"status": "ok"})
+    return client
+
+
+@pytest.fixture
+def chat_service(
+    mock_chat_repo,
+    mock_message_repo,
+    mock_project_repo,
+    mock_profile_gate_service,
+    mock_intent_registry_service,
+    mock_agent_availability_service,
+    mock_program_discovery_client,
+):
     """Create ChatService with mocked repositories."""
+    ChatService._RESPONSE_CACHE.clear()
     return ChatService(
         chat_repo=mock_chat_repo,
         message_repo=mock_message_repo,
         project_repo=mock_project_repo,
+        profile_gate_service=mock_profile_gate_service,
+        intent_registry_service=mock_intent_registry_service,
+        agent_availability_service=mock_agent_availability_service,
+        program_discovery_client=mock_program_discovery_client,
     )
 
 
@@ -101,8 +148,16 @@ def sample_message():
 
 
 @pytest.mark.asyncio
-async def test_create_chat_empty(chat_service, mock_chat_repo, sample_chat):
+async def test_create_chat_empty(chat_service, mock_chat_repo, sample_chat, mock_profile_gate_service):
     """Test creating an empty chat without initial message."""
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete",
+    }
     mock_chat_repo.create.return_value = sample_chat
 
     result = await chat_service.create_chat(user_id="user-456", initial_message=None)
@@ -113,8 +168,18 @@ async def test_create_chat_empty(chat_service, mock_chat_repo, sample_chat):
 
 
 @pytest.mark.asyncio
-async def test_create_chat_with_message(chat_service, mock_chat_repo, mock_message_repo, sample_chat, sample_message):
+async def test_create_chat_with_message(
+    chat_service, mock_chat_repo, mock_message_repo, sample_chat, sample_message, mock_profile_gate_service
+):
     """Test creating a chat with an initial message."""
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete",
+    }
     mock_chat_repo.create.return_value = sample_chat
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
@@ -134,8 +199,23 @@ async def test_create_chat_with_message(chat_service, mock_chat_repo, mock_messa
 
 
 @pytest.mark.asyncio
-async def test_send_message_success(chat_service, mock_chat_repo, mock_message_repo, sample_chat, sample_message):
+async def test_send_message_success(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
     """Test sending a message successfully."""
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete",
+    }
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
     mock_message_repo.create.return_value = sample_message
@@ -150,6 +230,540 @@ async def test_send_message_success(chat_service, mock_chat_repo, mock_message_r
     assert "assistant_message" in result
     assert "chat" in result
     assert mock_message_repo.create.call_count == 2
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "Great, I can help" in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_reuses_cached_response_for_repeated_turns(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Repeated identical turns in the same chat should reuse the cached assistant response."""
+    ChatService._RESPONSE_CACHE.clear()
+    chat_service._build_intent_ready_response = MagicMock(return_value="cached-intent-response")
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "optional_missing_fields": [],
+        "updated_at": "2026-04-12T00:00:00",
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "program_discovery",
+        "missing_required_fields": [],
+        "missing_optional_fields": [],
+    }
+    chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Find graduate programs for me",
+    )
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Find graduate programs for me",
+    )
+
+    assert chat_service._build_intent_ready_response.call_count == 1
+    assistant_messages = [
+        call for call in mock_message_repo.create.call_args_list if call.kwargs.get("role") == "assistant"
+    ]
+    assert len(assistant_messages) == 2
+    assert assistant_messages[-1].kwargs["content"] == "cached-intent-response"
+
+
+@pytest.mark.asyncio
+async def test_send_message_profile_gate_denied(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Test that incomplete profiles receive deterministic guidance."""
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": False,
+        "missing_fields": ["email", "profession"],
+        "updated_at": None,
+        "allowed": False,
+        "reason": "profile_incomplete",
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    result = await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Hello!",
+    )
+
+    assert "assistant_message" in result
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "I can help with scholarships and program searches" in assistant_kwargs["content"]
+    assert "Let's start with your email address." in assistant_kwargs["content"]
+    assert assistant_kwargs["metadata"]["profile_gate"]["allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_assistant_notice_persists_assistant_message(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+):
+    """Assistant notice should create assistant-only message and update chat counters."""
+    assistant_notice = {
+        "id": "msg-asst-001",
+        "chat_id": "chat-123",
+        "role": "assistant",
+        "content": "Thanks for uploading your CV. What is your target degree level?",
+        "metadata": {"source": "profile_upload_followup"},
+        "created_at": datetime.now(timezone.utc),
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 1}
+    mock_message_repo.create.return_value = assistant_notice
+
+    result = await chat_service.post_assistant_notice(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Thanks for uploading your CV. What is your target degree level?",
+        metadata={"source": "profile_upload_followup", "notice_title": "Profile Completion"},
+    )
+
+    assert result["assistant_message"]["role"] == "assistant"
+    assert result["assistant_message"]["metadata"]["source"] == "profile_upload_followup"
+    mock_message_repo.create.assert_called_once()
+    _, kwargs = mock_message_repo.create.call_args
+    assert kwargs["role"] == "assistant"
+    assert kwargs["metadata"]["source"] == "profile_upload_followup"
+    mock_chat_repo.increment_message_count.assert_called_once_with("chat-123", increment=1)
+    mock_chat_repo.set_title_if_empty.assert_called_once()
+    set_title_call_args = mock_chat_repo.set_title_if_empty.call_args.args
+    assert set_title_call_args[0] == "chat-123"
+    assert set_title_call_args[1] == "Profile Completion"
+
+
+@pytest.mark.asyncio
+async def test_send_message_profile_completion_returns_readiness_summary(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Profile completion should respond with a profile-specific readiness summary."""
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "optional_missing_fields": ["target_study_country", "funding_source"],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "profile_completion",
+        "missing_required_fields": [],
+        "missing_optional_fields": ["target_study_country", "funding_source"],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="let's complete my profile",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "Your core profile is complete" in assistant_kwargs["content"]
+    assert "preferred study country" in assistant_kwargs["content"]
+    assert "funding source" in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_cv_upload_returns_upload_guidance(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """CV upload requests should route to a CV upload guidance response."""
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "optional_missing_fields": [],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "profile_completion",
+        "missing_required_fields": [],
+        "missing_optional_fields": [],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="I'd like to upload my CV for processing, analysis and feedback on ORB",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "process your CV" in assistant_kwargs["content"]
+    assert "/api/v1/workflows/profile-upload" in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_profile_gate_uses_natural_labels_for_remaining_fields(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Test that saved and missing profile fields are rendered with natural labels."""
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["intended_field_of_study"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete",
+        },
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["intended_field_of_study"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {
+        "applied_fields": ["gpa_highest", "gpa_scale"]
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="4.00/5.00",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "Great, I saved your GPA and GPA scale." in assistant_kwargs["content"]
+    assert "Next, please share your intended field of study." in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_profile_gate_collects_and_rechecks(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Test that profile fields from chat are collected before the second gate decision."""
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["email"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete",
+        },
+        {
+            "user_id": "user-456",
+            "completed": True,
+            "missing_fields": [],
+            "updated_at": None,
+            "allowed": True,
+            "reason": "profile_complete",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {"applied_fields": ["email"]}
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    result = await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="My email is jane@example.com",
+    )
+
+    assert "assistant_message" in result
+    assert mock_profile_gate_service.evaluate_gate.await_count == 2
+    mock_profile_gate_service.collect_profile_updates_from_chat.assert_awaited_once()
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "Great, I can help" in assistant_kwargs["content"]
+    assert assistant_kwargs["metadata"]["profile_gate"]["allowed"] is True
+
+
+@pytest.mark.asyncio
+async def test_send_message_program_discovery_mentions_singapore_when_present(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+    mock_program_discovery_client,
+):
+    """Program discovery reply should acknowledge Singapore when user mentions it."""
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+    }
+    chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Discover graduate program in singapore",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "programs in Singapore" in assistant_kwargs["content"]
+    mock_program_discovery_client.probe_health.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_message_program_discovery_unavailable_still_probes(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+    mock_program_discovery_client,
+):
+    """Program-discovery should receive a best-effort probe even when unavailable."""
+    chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
+    chat_service.agent_availability_service.is_agent_available.return_value = False
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Find programs for data science",
+    )
+
+    mock_profile_gate_service.evaluate_gate.assert_not_awaited()
+    mock_program_discovery_client.probe_health.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_message_profile_gate_acknowledges_applied_fields(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """When chat extraction applies fields but gate remains closed, assistant should acknowledge and ask next."""
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["email", "gpa"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete",
+        },
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["gpa"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {"applied_fields": ["email"]}
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="My email is jane@example.com",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "Great, I saved your email address." in assistant_kwargs["content"]
+    assert "Next, please share your GPA." in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_out_of_scope_returns_boundary_guidance(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Out-of-scope messages should return boundary guidance without profile gating."""
+    chat_service.intent_registry_service.detect_intent.return_value = "out_of_scope"
+    chat_service.intent_registry_service.get_policy.return_value = {
+        "fallback": {
+            "suggest_intents": ["scholarship_search", "program_discovery"],
+        }
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Tell me a cooking recipe",
+    )
+
+    mock_profile_gate_service.evaluate_gate.assert_not_awaited()
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "I can only help with education planning tasks right now." in assistant_kwargs["content"]
+    assert "scholarship search" in assistant_kwargs["content"]
+    assert assistant_kwargs["metadata"]["intent"] == "out_of_scope"
+
+
+@pytest.mark.asyncio
+async def test_send_message_mapped_intent_with_unavailable_agent_returns_unavailable_message(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Mapped intents with unavailable agents should return unavailable-service guidance."""
+    chat_service.intent_registry_service.detect_intent.return_value = "scholarship_search"
+    chat_service.intent_registry_service.get_policy.return_value = {
+        "agent": "scholarship-discovery",
+        "fallback": {
+            "suggest_intents": ["program_discovery", "application_planning"],
+        },
+    }
+    chat_service.agent_availability_service.is_agent_available.return_value = False
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Find scholarship options for me",
+    )
+
+    mock_profile_gate_service.evaluate_gate.assert_not_awaited()
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "service is temporarily unavailable" in assistant_kwargs["content"]
+    assert "scholarship-discovery" in assistant_kwargs["content"]
+    assert assistant_kwargs["metadata"]["profile_gate"]["reason"] == "intent_agent_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_send_message_out_of_scope_is_overridden_during_profile_clarification(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Short clarification replies should stay in profile-completion flow."""
+    chat_service.intent_registry_service.detect_intent.return_value = "out_of_scope"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": False,
+        "missing_fields": ["target_degree_level"],
+        "updated_at": None,
+        "allowed": False,
+        "reason": "profile_incomplete_for_intent",
+    }
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {
+        "applied_fields": ["target_degree_level"],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = [
+        {
+            "id": "assistant-prev-1",
+            "role": "assistant",
+            "content": "Let's start with your target degree level.",
+            "metadata": {
+                "profile_gate": {
+                    "allowed": False,
+                    "reason": "profile_incomplete_for_intent",
+                }
+            },
+        }
+    ]
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="yes",
+    )
+
+    evaluate_kwargs = mock_profile_gate_service.evaluate_gate.call_args.kwargs
+    assert evaluate_kwargs["intent"] == "profile_completion"
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["metadata"]["intent"] == "profile_completion"
 
 
 @pytest.mark.asyncio

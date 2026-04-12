@@ -55,6 +55,30 @@ class SendMessageRequest(BaseModel):
         return stripped
 
 
+class AssistantNoticeRequest(BaseModel):
+    """Post an assistant-authored notice without creating a synthetic user message."""
+
+    content: str = Field(
+        ...,
+        min_length=1,
+        max_length=10000,
+        description="Assistant notice content",
+        examples=["Thanks for uploading your CV. What is your target degree level?"],
+    )
+    metadata: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional metadata to persist with the assistant notice",
+    )
+
+    @field_validator("content")
+    @classmethod
+    def strip_content(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Assistant notice content cannot be empty or whitespace only")
+        return stripped
+
+
 class UpdateChatRequest(BaseModel):
     """Update chat metadata (title, starred status, project assignment)."""
 
@@ -125,6 +149,13 @@ class SendMessageResponse(BaseModel):
     """Response after sending a message—includes both user and assistant messages."""
 
     user_message: MessageResponse
+    assistant_message: MessageResponse
+    chat: ChatResponse
+
+
+class AssistantNoticeResponse(BaseModel):
+    """Response after posting an assistant-authored notice."""
+
     assistant_message: MessageResponse
     chat: ChatResponse
 

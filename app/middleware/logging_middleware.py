@@ -17,6 +17,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         trace_id = bind_trace_id(request.headers.get("X-Trace-ID"))
         start = time.perf_counter()
+        response: Response | None = None
 
         logger.info("request_started", method=request.method, path=request.url.path)
 
@@ -31,10 +32,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "request_completed",
                 method=request.method,
                 path=request.url.path,
-                status=getattr(response, "status_code", 500) if "response" in dir() else 500,
+                status=getattr(response, "status_code", 500),
                 latency_ms=elapsed_ms,
             )
-            response.headers["X-Trace-ID"] = trace_id
+            if response is not None:
+                response.headers["X-Trace-ID"] = trace_id
             clear_trace_context()
 
         return response

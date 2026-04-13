@@ -179,6 +179,25 @@ JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
 ```
 
+### 2b. Generate Internal Service Token Keys
+
+```bash
+openssl genrsa -out internal_private.pem 2048
+openssl rsa -in internal_private.pem -pubout -out internal_public.pem
+```
+
+Copy the internal PEM files into `.env` as single-line escaped values, just like the user JWT keys. Keep the internal private key separate from the user auth keys.
+
+```
+INTERNAL_TOKEN_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+INTERNAL_TOKEN_ACTIVE_KID="internal-v1"
+INTERNAL_TOKEN_ENABLED=true
+INTERNAL_TOKEN_ISSUER="ouroboros-orchestrator-internal"
+INTERNAL_TOKEN_TTL_SECONDS=120
+```
+
+Then delete `internal_private.pem` and `internal_public.pem` locally.
+
 ### 3. Set Up Twilio
 
 1. Sign up at [twilio.com](https://www.twilio.com)

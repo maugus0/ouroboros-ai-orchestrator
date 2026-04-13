@@ -136,6 +136,7 @@ class ProfileGateService:
             logger.info("profile_readiness_cache_hit", user_id=user_id, intent=intent)
             return cached
 
+        started_at = time.perf_counter()
         try:
             payload = await self.student_profile_client.get_profile_status(user_id=user_id, intent=intent)
             await self._record_agent_call(
@@ -147,6 +148,7 @@ class ProfileGateService:
                 request_path="/api/v1/profiles/status",
                 call_status="success",
                 response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
                 retry_of_log_id=retry_of_log_id,
             )
         except AgentClientError as exc:
@@ -161,6 +163,7 @@ class ProfileGateService:
                 http_status=exc.status_code,
                 error_code="agent_client_error",
                 error_message=str(exc),
+                latency_ms=self._elapsed_ms(started_at),
                 retry_of_log_id=retry_of_log_id,
             )
             logger.error("profile_readiness_fetch_failed", user_id=user_id, error=str(exc))
@@ -178,6 +181,7 @@ class ProfileGateService:
                 workflow_run_id=workflow_run_id,
                 retry_of_log_id=retry_of_log_id,
             )
+            refresh_started_at = time.perf_counter()
             try:
                 refreshed_payload = await self.student_profile_client.get_profile_status(user_id=user_id, intent=intent)
                 await self._record_agent_call(
@@ -189,6 +193,7 @@ class ProfileGateService:
                     request_path="/api/v1/profiles/status",
                     call_status="success",
                     response_payload=refreshed_payload if isinstance(refreshed_payload, dict) else None,
+                    latency_ms=self._elapsed_ms(refresh_started_at),
                     retry_of_log_id=retry_of_log_id,
                 )
                 refreshed = self._extract_readiness_payload(refreshed_payload)
@@ -206,6 +211,7 @@ class ProfileGateService:
                     http_status=exc.status_code,
                     error_code="agent_client_error",
                     error_message=str(exc),
+                    latency_ms=self._elapsed_ms(refresh_started_at),
                     retry_of_log_id=retry_of_log_id,
                 )
                 logger.warning("profile_readiness_refresh_failed", user_id=user_id, error=str(exc))
@@ -269,6 +275,7 @@ class ProfileGateService:
         if not payload:
             return
 
+        started_at = time.perf_counter()
         try:
             await self.student_profile_client.sync_user_profile(user_id=user_id, payload=payload)
             await self._record_agent_call(
@@ -280,6 +287,7 @@ class ProfileGateService:
                 request_path="/api/v1/profiles/sync-user",
                 call_status="success",
                 request_payload={"user_id": user_id, **payload},
+                latency_ms=self._elapsed_ms(started_at),
                 retry_of_log_id=retry_of_log_id,
             )
             logger.info("student_profile_seeded_from_user", user_id=user_id, fields=list(payload.keys()))
@@ -296,6 +304,7 @@ class ProfileGateService:
                 error_code="agent_client_error",
                 error_message=str(exc),
                 request_payload={"user_id": user_id, **payload},
+                latency_ms=self._elapsed_ms(started_at),
                 retry_of_log_id=retry_of_log_id,
             )
             logger.warning("student_profile_seed_failed", user_id=user_id, error=str(exc))
@@ -384,6 +393,7 @@ class ProfileGateService:
                 "extraction_telemetry": extraction_telemetry,
             }
 
+        started_at = time.perf_counter()
         try:
             payload = await self.student_profile_client.collect_from_chat(
                 user_id=user_id,
@@ -413,6 +423,7 @@ class ProfileGateService:
                     "extraction_telemetry": extraction_telemetry,
                 },
                 response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
                 retry_of_log_id=retry_of_log_id,
             )
             logger.info(
@@ -455,6 +466,7 @@ class ProfileGateService:
                     "correction_fields": correction_fields,
                     "extraction_telemetry": extraction_telemetry,
                 },
+                latency_ms=self._elapsed_ms(started_at),
                 retry_of_log_id=retry_of_log_id,
             )
             logger.warning(
@@ -513,6 +525,7 @@ class ProfileGateService:
         error_message: Optional[str] = None,
         request_payload: Optional[dict[str, Any]] = None,
         response_payload: Optional[dict[str, Any]] = None,
+        latency_ms: Optional[int] = None,
         retry_of_log_id: Optional[str] = None,
     ) -> None:
         repo = self.agent_call_log_repo
@@ -536,10 +549,15 @@ class ProfileGateService:
                 error_message=error_message,
                 request_payload=request_payload,
                 response_payload=response_payload,
+                latency_ms=latency_ms,
                 retry_of_log_id=retry_of_log_id,
             )
         except (aiomysql.Error, RuntimeError, ValueError, TypeError, AttributeError) as exc:  # pragma: no cover
             logger.warning("agent_call_log_write_failed", operation=operation, error=str(exc))
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(0, int((time.perf_counter() - started_at) * 1000))
 
     @classmethod
     def _extract_profile_fields_from_chat(cls, content: str, missing_fields: list[str]) -> dict[str, Any]:

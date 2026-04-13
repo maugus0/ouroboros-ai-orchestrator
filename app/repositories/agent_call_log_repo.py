@@ -36,6 +36,7 @@ class AgentCallLogRepository:
         response_payload: Optional[dict[str, Any]] = None,
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        latency_ms: Optional[int] = None,
         retry_of_log_id: Optional[str] = None,
     ) -> None:
         query = """
@@ -43,13 +44,13 @@ class AgentCallLogRepository:
                 id, workflow_run_id, user_id, chat_id, target_service, operation,
                 request_method, request_path, attempt_number, status, http_status,
                 error_code, error_message, request_payload, response_payload,
-                trace_id, session_id, retry_of_log_id, created_at
+                trace_id, session_id, latency_ms, retry_of_log_id, created_at
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                %s, %s, %s, UTC_TIMESTAMP(6)
+                %s, %s, %s, %s, UTC_TIMESTAMP(6)
             )
         """
 
@@ -78,6 +79,7 @@ class AgentCallLogRepository:
                         response_json,
                         trace_id,
                         session_id,
+                        latency_ms,
                         retry_of_log_id,
                     ),
                 )

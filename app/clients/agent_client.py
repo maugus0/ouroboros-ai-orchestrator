@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import httpx
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.logging import get_logger
 
@@ -37,6 +38,7 @@ class AgentClient:
         retries: int = 2,
         backoff_factor: float = 1.0,
         default_headers: Optional[Mapping[str, str]] = None,
+        sleep_func: Optional[Callable[[float], Awaitable[Any]]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.service_name = service_name
@@ -44,6 +46,29 @@ class AgentClient:
         self.retries = max(0, retries)
         self.backoff_factor = max(0.0, backoff_factor)
         self.default_headers = dict(default_headers or {})
+        self._sleep_func = sleep_func or asyncio.sleep
+
+    def _create_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=self.timeout_seconds)
+
+    def _log_before_sleep(self, retry_state: RetryCallState, method: str, url: str) -> None:
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "agent_request_retrying",
+            service_name=self.service_name,
+            method=method.upper(),
+            url=url,
+            attempt=retry_state.attempt_number,
+            max_attempts=self.retries + 1,
+            status_code=status_code,
+            error=str(exc) if exc else None,
+            next_sleep_seconds=retry_state.next_action.sleep if retry_state.next_action else None,
+        )
+
+    @staticmethod
+    def _retryable_exceptions() -> tuple[type[BaseException], ...]:
+        return (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError)
 
     def _build_headers(
         self,
@@ -89,68 +114,79 @@ class AgentClient:
         )
         url = f"{self.base_url}{path}"
 
-        last_error: Optional[Exception] = None
         attempts = self.retries + 1
+        retryer = AsyncRetrying(
+            stop=stop_after_attempt(attempts),
+            wait=wait_exponential(
+                multiplier=self.backoff_factor,
+                min=self.backoff_factor,
+                max=max(self.backoff_factor, self.backoff_factor * 2),
+            ),
+            retry=retry_if_exception_type(self._retryable_exceptions()),
+            reraise=True,
+            sleep=self._sleep_func,
+            before_sleep=lambda state: self._log_before_sleep(state, method, url),
+        )
 
-        for attempt in range(1, attempts + 1):
-            logger.info(
-                "agent_request_started",
+        try:
+            async for attempt in retryer:
+                attempt_number = attempt.retry_state.attempt_number
+                logger.info(
+                    "agent_request_started",
+                    service_name=self.service_name,
+                    method=method.upper(),
+                    url=url,
+                    attempt=attempt_number,
+                    max_attempts=attempts,
+                )
+                with attempt:
+                    async with self._create_http_client() as client:
+                        response = await client.request(
+                            method=method.upper(),
+                            url=url,
+                            json=json,
+                            params=params,
+                            headers=headers,
+                        )
+
+                    if response.status_code >= 500:
+                        raise httpx.HTTPStatusError(
+                            message=f"{self.service_name} returned {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                    response.raise_for_status()
+
+                    logger.info(
+                        "agent_request_succeeded",
+                        service_name=self.service_name,
+                        method=method.upper(),
+                        url=url,
+                        status_code=response.status_code,
+                        attempt=attempt_number,
+                    )
+
+                    if not response.content:
+                        return None
+                    return response.json()
+        except self._retryable_exceptions() as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            response_text = getattr(getattr(exc, "response", None), "text", None)
+            logger.warning(
+                "agent_request_failed",
                 service_name=self.service_name,
                 method=method.upper(),
                 url=url,
-                attempt=attempt,
+                attempt=attempts,
                 max_attempts=attempts,
+                status_code=status_code,
+                error=str(exc),
             )
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                    response = await client.request(
-                        method=method.upper(),
-                        url=url,
-                        json=json,
-                        params=params,
-                        headers=headers,
-                    )
-                if response.status_code >= 500:
-                    raise httpx.HTTPStatusError(
-                        message=f"{self.service_name} returned {response.status_code}",
-                        request=response.request,
-                        response=response,
-                    )
-                response.raise_for_status()
-                logger.info(
-                    "agent_request_succeeded",
-                    service_name=self.service_name,
-                    method=method.upper(),
-                    url=url,
-                    status_code=response.status_code,
-                    attempt=attempt,
-                )
-                if not response.content:
-                    return None
-                return response.json()
-            except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
-                last_error = exc
-                status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                response_text = getattr(getattr(exc, "response", None), "text", None)
-                logger.warning(
-                    "agent_request_failed",
-                    service_name=self.service_name,
-                    method=method.upper(),
-                    url=url,
-                    attempt=attempt,
-                    max_attempts=attempts,
-                    status_code=status_code,
-                    error=str(exc),
-                )
-                if attempt >= attempts:
-                    raise AgentClientError(
-                        service_name=self.service_name,
-                        message=f"{self.service_name} request failed",
-                        status_code=status_code,
-                        response_text=response_text,
-                    ) from exc
-                await asyncio.sleep(self.backoff_factor * attempt)
+            raise AgentClientError(
+                service_name=self.service_name,
+                message=f"{self.service_name} request failed",
+                status_code=status_code,
+                response_text=response_text,
+            ) from exc
 
-        raise AgentClientError(
-            service_name=self.service_name, message=f"{self.service_name} request failed"
-        ) from last_error
+        raise AgentClientError(service_name=self.service_name, message=f"{self.service_name} request failed")

@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS agent_call_logs (
     response_payload    JSON DEFAULT NULL,
     trace_id            VARCHAR(64) DEFAULT NULL,
     session_id          VARCHAR(64) DEFAULT NULL,
+    latency_ms          INT UNSIGNED DEFAULT NULL COMMENT 'Downstream call duration in milliseconds',
     retry_of_log_id     VARCHAR(36) DEFAULT NULL COMMENT 'Self-reference to original failed call',
     created_at          DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 

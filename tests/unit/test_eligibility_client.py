@@ -60,9 +60,7 @@ async def test_client_forwards_headers_payload_and_params(monkeypatch):
     client = EligibilityClient(base_url="http://eligibility", service_token="token-123", timeout=5)
     result = await client.get_results(
         user_id="user-1",
-        entity_type="program",
-        page=2,
-        page_size=5,
+        query_params={"entity_type": "program", "page": 2, "page_size": 5},
         trace_id="trace-abc",
     )
 

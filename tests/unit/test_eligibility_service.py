@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.services.eligibility_service import EligibilityService
+from app.services.eligibility_service import EligibilityEvaluationInput, EligibilityResultsQuery, EligibilityService
 
 
 def _build_mock_client():
@@ -26,12 +26,14 @@ async def test_evaluate_builds_payload_from_authenticated_user():
     service = EligibilityService(client=mock_client)
 
     result = await service.evaluate(
-        user_id="user-123",
-        entity_type="program",
-        entity_id="program-456",
-        user_profile={"gpa_normalized": 3.9},
-        entity_data={"minimum_gpa": 3.5},
-        include_attribution=False,
+        EligibilityEvaluationInput(
+            user_id="user-123",
+            entity_type="program",
+            entity_id="program-456",
+            user_profile={"gpa_normalized": 3.9},
+            entity_data={"minimum_gpa": 3.5},
+            include_attribution=False,
+        ),
         trace_id="trace-abc",
     )
 
@@ -56,19 +58,19 @@ async def test_get_results_forwards_filters_and_pagination():
     service = EligibilityService(client=mock_client)
 
     result = await service.get_results(
-        user_id="user-123",
-        entity_type="scholarship",
-        page=2,
-        page_size=5,
+        EligibilityResultsQuery(
+            user_id="user-123",
+            entity_type="scholarship",
+            page=2,
+            page_size=5,
+        ),
         trace_id="trace-xyz",
     )
 
     assert result["success"] is True
     mock_client.get_results.assert_awaited_once_with(
         user_id="user-123",
-        entity_type="scholarship",
-        page=2,
-        page_size=5,
+        query_params={"entity_type": "scholarship", "page": 2, "page_size": 5},
         trace_id="trace-xyz",
     )
 

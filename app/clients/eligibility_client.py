@@ -1,5 +1,6 @@
 """HTTP client for calling the Eligibility Engine service."""
 
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
@@ -9,6 +10,15 @@ from app.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class EligibilityRequestOptions:
+    """Normalized request payload/options passed into the generic HTTP helper."""
+
+    json_body: Optional[dict[str, Any]] = None
+    params: Optional[dict[str, Any]] = None
+    trace_id: Optional[str] = None
 
 
 class EligibilityClient:
@@ -34,20 +44,18 @@ class EligibilityClient:
         self,
         method: str,
         path: str,
-        *,
-        json_body: Optional[dict[str, Any]] = None,
-        params: Optional[dict[str, Any]] = None,
-        trace_id: Optional[str] = None,
+        options: Optional[EligibilityRequestOptions] = None,
     ) -> dict[str, Any]:
+        options = options or EligibilityRequestOptions()
         url = f"{self.base_url}{path}"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.request(
                     method=method,
                     url=url,
-                    json=json_body,
-                    params=params,
-                    headers=self._build_headers(trace_id),
+                    json=options.json_body,
+                    params=options.params,
+                    headers=self._build_headers(options.trace_id),
                 )
             response.raise_for_status()
             return response.json()
@@ -78,31 +86,40 @@ class EligibilityClient:
 
     async def evaluate(self, payload: dict[str, Any], trace_id: Optional[str] = None) -> dict[str, Any]:
         """Proxy a matching/evaluate request to the eligibility service."""
-        return await self._request("POST", "/matching/evaluate", json_body=payload, trace_id=trace_id)
+        return await self._request(
+            "POST",
+            "/matching/evaluate",
+            EligibilityRequestOptions(json_body=payload, trace_id=trace_id),
+        )
 
     async def get_results(
         self,
         user_id: str,
-        entity_type: Optional[str] = None,
-        page: int = 1,
-        page_size: int = 20,
+        query_params: Optional[dict[str, Any]] = None,
         trace_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Fetch paginated match results for the authenticated user."""
-        params: dict[str, Any] = {"page": page, "page_size": page_size}
-        if entity_type is not None:
-            params["entity_type"] = entity_type
+        params = {"page": 1, "page_size": 20, **(query_params or {})}
+        if params.get("entity_type") is None:
+            params.pop("entity_type", None)
         return await self._request(
             "GET",
             f"/matching/results/{user_id}",
-            params=params,
-            trace_id=trace_id,
+            EligibilityRequestOptions(params=params, trace_id=trace_id),
         )
 
     async def get_result_detail(self, match_id: str, trace_id: Optional[str] = None) -> dict[str, Any]:
         """Fetch a single match result by ID."""
-        return await self._request("GET", f"/matching/results/detail/{match_id}", trace_id=trace_id)
+        return await self._request(
+            "GET",
+            f"/matching/results/detail/{match_id}",
+            EligibilityRequestOptions(trace_id=trace_id),
+        )
 
     async def get_attribution_report(self, match_id: str, trace_id: Optional[str] = None) -> dict[str, Any]:
         """Fetch an attribution report for a match result."""
-        return await self._request("GET", f"/attribution/report/{match_id}", trace_id=trace_id)
+        return await self._request(
+            "GET",
+            f"/attribution/report/{match_id}",
+            EligibilityRequestOptions(trace_id=trace_id),
+        )

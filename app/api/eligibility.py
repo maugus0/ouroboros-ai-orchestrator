@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, Header, Path, Query
 from app.middleware.auth_middleware import get_current_user_id
 from app.models.common import StandardResponse
 from app.models.eligibility import EligibilityEvaluateRequest
-from app.services.eligibility_service import EligibilityService
+from app.services.eligibility_service import (
+    EligibilityEvaluationInput,
+    EligibilityResultsQuery,
+    EligibilityService,
+)
 
 router = APIRouter(prefix="/api/v1/eligibility", tags=["Eligibility"])
 eligibility_service = EligibilityService()
@@ -25,12 +29,14 @@ async def evaluate_eligibility(
 ):
     """Proxy an evaluation request to the eligibility engine using the authenticated user ID."""
     return await eligibility_service.evaluate(
-        user_id=user_id,
-        entity_type=body.entity_type,
-        entity_id=body.entity_id,
-        user_profile=body.user_profile,
-        entity_data=body.entity_data,
-        include_attribution=body.include_attribution,
+        EligibilityEvaluationInput(
+            user_id=user_id,
+            entity_type=body.entity_type,
+            entity_id=body.entity_id,
+            user_profile=body.user_profile,
+            entity_data=body.entity_data,
+            include_attribution=body.include_attribution,
+        ),
         trace_id=trace_id,
     )
 
@@ -49,10 +55,12 @@ async def get_results(
 ):
     """Return paginated eligibility results for the current authenticated user."""
     return await eligibility_service.get_results(
-        user_id=user_id,
-        entity_type=entity_type,
-        page=page,
-        page_size=page_size,
+        EligibilityResultsQuery(
+            user_id=user_id,
+            entity_type=entity_type,
+            page=page,
+            page_size=page_size,
+        ),
         trace_id=trace_id,
     )
 

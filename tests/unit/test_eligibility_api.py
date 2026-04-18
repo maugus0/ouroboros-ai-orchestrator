@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api import eligibility as eligibility_api
 from app.middleware.auth_middleware import get_current_user_id
+from app.services.eligibility_service import EligibilityEvaluationInput, EligibilityResultsQuery
 
 app = FastAPI()
 app.include_router(eligibility_api.router)
@@ -50,12 +51,14 @@ def test_evaluate_endpoint_injects_authenticated_user_and_trace_header(monkeypat
     assert response.status_code == 200
     assert response.json()["data"]["match_result"]["id"] == "match-1"
     mock_service.evaluate.assert_awaited_once_with(
-        user_id="user-123",
-        entity_type="program",
-        entity_id="program-1",
-        user_profile={"gpa_normalized": 3.8},
-        entity_data={"minimum_gpa": 3.5},
-        include_attribution=True,
+        EligibilityEvaluationInput(
+            user_id="user-123",
+            entity_type="program",
+            entity_id="program-1",
+            user_profile={"gpa_normalized": 3.8},
+            entity_data={"minimum_gpa": 3.5},
+            include_attribution=True,
+        ),
         trace_id="trace-123",
     )
 
@@ -76,10 +79,12 @@ def test_get_results_endpoint_forwards_query_parameters(monkeypatch):
     assert response.status_code == 200
     assert response.json()["data"]["items"] == []
     mock_service.get_results.assert_awaited_once_with(
-        user_id="user-123",
-        entity_type="scholarship",
-        page=2,
-        page_size=5,
+        EligibilityResultsQuery(
+            user_id="user-123",
+            entity_type="scholarship",
+            page=2,
+            page_size=5,
+        ),
         trace_id="trace-456",
     )
 

@@ -7,8 +7,7 @@ import pytest
 from app.services.eligibility_service import EligibilityService
 
 
-@pytest.fixture
-def mock_client():
+def _build_mock_client():
     """Create a mocked eligibility client."""
     client = MagicMock()
     client.evaluate = AsyncMock(return_value={"success": True, "message": "OK", "data": {"match_result": {}}})
@@ -20,16 +19,13 @@ def mock_client():
     return client
 
 
-@pytest.fixture
-def eligibility_service(mock_client):
-    """Create EligibilityService with a mocked downstream client."""
-    return EligibilityService(client=mock_client)
-
-
 @pytest.mark.asyncio
-async def test_evaluate_builds_payload_from_authenticated_user(eligibility_service, mock_client):
+async def test_evaluate_builds_payload_from_authenticated_user():
     """Service should inject the orchestrator-authenticated user into the downstream payload."""
-    result = await eligibility_service.evaluate(
+    mock_client = _build_mock_client()
+    service = EligibilityService(client=mock_client)
+
+    result = await service.evaluate(
         user_id="user-123",
         entity_type="program",
         entity_id="program-456",
@@ -54,9 +50,12 @@ async def test_evaluate_builds_payload_from_authenticated_user(eligibility_servi
 
 
 @pytest.mark.asyncio
-async def test_get_results_forwards_filters_and_pagination(eligibility_service, mock_client):
+async def test_get_results_forwards_filters_and_pagination():
     """Service should forward result-list filters transparently."""
-    result = await eligibility_service.get_results(
+    mock_client = _build_mock_client()
+    service = EligibilityService(client=mock_client)
+
+    result = await service.get_results(
         user_id="user-123",
         entity_type="scholarship",
         page=2,
@@ -75,10 +74,13 @@ async def test_get_results_forwards_filters_and_pagination(eligibility_service, 
 
 
 @pytest.mark.asyncio
-async def test_detail_and_attribution_delegate_to_client(eligibility_service, mock_client):
+async def test_detail_and_attribution_delegate_to_client():
     """Service should delegate detail and attribution lookups without reshaping the response."""
-    detail = await eligibility_service.get_result_detail(match_id="match-1", trace_id="trace-1")
-    attribution = await eligibility_service.get_attribution_report(match_id="match-1", trace_id="trace-2")
+    mock_client = _build_mock_client()
+    service = EligibilityService(client=mock_client)
+
+    detail = await service.get_result_detail(match_id="match-1", trace_id="trace-1")
+    attribution = await service.get_attribution_report(match_id="match-1", trace_id="trace-2")
 
     assert detail["data"]["id"] == "match-1"
     assert attribution["data"]["match_id"] == "match-1"

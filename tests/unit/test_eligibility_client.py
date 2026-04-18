@@ -47,8 +47,8 @@ async def test_client_forwards_headers_payload_and_params(monkeypatch):
     """Client should forward service token, trace ID, payload and params to downstream."""
     captured: dict[str, Any] = {}
 
-    async def request_handler(**kwargs):
-        captured.update(kwargs)
+    async def request_handler(**request_kwargs):
+        captured.update(request_kwargs)
         return _FakeResponse(json_body={"success": True, "message": "OK", "data": {"items": []}})
 
     monkeypatch.setattr(
@@ -76,7 +76,7 @@ async def test_client_forwards_headers_payload_and_params(monkeypatch):
 async def test_client_maps_timeout_to_504(monkeypatch):
     """Transport timeouts should become 504 errors for the orchestrator caller."""
 
-    async def request_handler(**kwargs):  # noqa: ARG001
+    async def request_handler(**_kwargs):
         raise httpx.TimeoutException("timeout")
 
     monkeypatch.setattr(
@@ -98,7 +98,7 @@ async def test_client_maps_timeout_to_504(monkeypatch):
 async def test_client_maps_http_error_to_502(monkeypatch):
     """Downstream HTTP errors should surface as 502 to the upstream caller."""
 
-    async def request_handler(**kwargs):  # noqa: ARG001
+    async def request_handler(**_kwargs):
         return _FakeResponse(status_code=403, text="forbidden")
 
     monkeypatch.setattr(

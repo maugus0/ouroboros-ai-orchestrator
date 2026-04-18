@@ -17,8 +17,7 @@ def _override_current_user_id() -> str:
     return "11111111-1111-1111-1111-111111111111"
 
 
-@pytest.fixture
-def eligibility_proxy_app(monkeypatch):
+def _build_proxy_test_app(monkeypatch):
     """Create a small app that exercises the real eligibility proxy router."""
     app = FastAPI()
     app.include_router(eligibility_api.router)
@@ -38,14 +37,13 @@ def eligibility_proxy_app(monkeypatch):
     )
     monkeypatch.setattr(eligibility_api, "eligibility_service", real_service)
 
-    yield app
-
-    app.dependency_overrides.clear()
+    return app
 
 
-def test_proxy_evaluate_and_fetch_results_against_real_eligibility_engine(eligibility_proxy_app):
+def test_proxy_evaluate_and_fetch_results_against_real_eligibility_engine(monkeypatch):
     """Run a real orchestrator -> eligibility-engine proxy smoke flow."""
-    client = TestClient(eligibility_proxy_app)
+    proxy_test_app = _build_proxy_test_app(monkeypatch)
+    client = TestClient(proxy_test_app)
     entity_id = str(uuid.uuid4())
 
     evaluate_response = client.post(
@@ -96,10 +94,11 @@ def test_proxy_evaluate_and_fetch_results_against_real_eligibility_engine(eligib
     assert any(item["id"] == match_result["id"] for item in list_body["data"]["items"])
 
     detail_response = client.get(
-        "/api/v1/eligibility/results/{match_id}".format(match_id=match_result["id"]),
+        f"/api/v1/eligibility/results/{match_result['id']}",
         headers={"X-Trace-ID": "proxy-trace-3"},
     )
     assert detail_response.status_code == 200
     detail_body = detail_response.json()
     assert detail_body["success"] is True
     assert detail_body["data"]["id"] == match_result["id"]
+    proxy_test_app.dependency_overrides.clear()

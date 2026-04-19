@@ -40,7 +40,8 @@ async def get_my_profile_readiness(
     intent: str | None = Query(default=None),
 ):
     """Return the current user's profile readiness snapshot."""
-    return await profile_gate_service.get_user_readiness(user_id, intent=intent)
+    normalized_intent = intent or "profile_completion"
+    return await profile_gate_service.get_user_readiness(user_id, intent=normalized_intent)
 
 
 @router.get("/chats/{chat_id}/status")
@@ -54,7 +55,8 @@ async def get_chat_workflow_status(
     if not chat or chat.get("user_id") != user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found")
 
-    readiness = await profile_gate_service.get_user_readiness(user_id, intent=intent)
+    normalized_intent = intent or "profile_completion"
+    readiness = await profile_gate_service.get_user_readiness(user_id, intent=normalized_intent)
     messages = await _get_message_repo().list_by_chat(chat_id=chat_id, limit=1, order="desc")
     latest_message = messages[0] if messages else None
 
@@ -123,7 +125,12 @@ def _map_agent_execution_state(readiness: dict[str, Any], latest_message: dict[s
     if not readiness.get("completed"):
         return "PROFILE_GATE"
 
-    metadata = latest_message.get("metadata") if isinstance(latest_message, dict) else None
+    if not isinstance(latest_message, dict):
+        return "RECEIVED"
+
+    metadata = latest_message.get("metadata")
+    latest_role = str(latest_message.get("role") or "").lower()
+
     if isinstance(metadata, dict):
         profile_gate = metadata.get("profile_gate")
         if isinstance(profile_gate, dict):
@@ -132,6 +139,10 @@ def _map_agent_execution_state(readiness: dict[str, Any], latest_message: dict[s
             if profile_gate.get("allowed") is True:
                 return "SUCCESS"
 
-    if latest_message:
+    if latest_role == "assistant":
         return "SUCCESS"
+
+    if latest_role == "user":
+        return "EXECUTING"
+
     return "RECEIVED"

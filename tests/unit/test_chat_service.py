@@ -284,6 +284,55 @@ async def test_send_message_reuses_cached_response_for_repeated_turns(
 
 
 @pytest.mark.asyncio
+async def test_response_cache_evicts_oldest_entries():
+    """The response cache should stay bounded and evict the least-recently-used entry."""
+    original_max_entries = ChatService._RESPONSE_CACHE_MAX_ENTRIES
+    original_ttl_seconds = ChatService._RESPONSE_CACHE_TTL_SECONDS
+    ChatService._RESPONSE_CACHE.clear()
+    ChatService._RESPONSE_CACHE_MAX_ENTRIES = 2
+    ChatService._RESPONSE_CACHE_TTL_SECONDS = 3600
+
+    try:
+        key_one = ChatService._build_response_cache_key(
+            "chat-123",
+            "first message",
+            "program_discovery",
+            {"allowed": True, "reason": "profile_complete_for_intent"},
+            "program-discovery",
+        )
+        key_two = ChatService._build_response_cache_key(
+            "chat-123",
+            "second message",
+            "program_discovery",
+            {"allowed": True, "reason": "profile_complete_for_intent"},
+            "program-discovery",
+        )
+        key_three = ChatService._build_response_cache_key(
+            "chat-123",
+            "third message",
+            "program_discovery",
+            {"allowed": True, "reason": "profile_complete_for_intent"},
+            "program-discovery",
+        )
+
+        ChatService._set_cached_response(key_one, {"assistant_content": "one", "gate": {"allowed": True}})
+        ChatService._set_cached_response(key_two, {"assistant_content": "two", "gate": {"allowed": True}})
+
+        assert ChatService._get_cached_response(key_one)["assistant_content"] == "one"
+
+        ChatService._set_cached_response(key_three, {"assistant_content": "three", "gate": {"allowed": True}})
+
+        assert ChatService._get_cached_response(key_one)["assistant_content"] == "one"
+        assert ChatService._get_cached_response(key_two) is None
+        assert ChatService._get_cached_response(key_three)["assistant_content"] == "three"
+        assert len(ChatService._RESPONSE_CACHE) == 2
+    finally:
+        ChatService._RESPONSE_CACHE.clear()
+        ChatService._RESPONSE_CACHE_MAX_ENTRIES = original_max_entries
+        ChatService._RESPONSE_CACHE_TTL_SECONDS = original_ttl_seconds
+
+
+@pytest.mark.asyncio
 async def test_send_message_profile_gate_denied(
     chat_service,
     mock_chat_repo,

@@ -3,6 +3,7 @@
 import re
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Optional
 
 import aiomysql
@@ -41,7 +42,8 @@ class ProfileGateService:
 
     _AUTO_PERSIST_CONFIDENCE_THRESHOLD = 0.85
     _READINESS_CACHE_TTL_SECONDS = 30
-    _READINESS_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+    _READINESS_CACHE_MAX_ENTRIES = 256
+    _READINESS_CACHE: OrderedDict[tuple[str, str], tuple[float, dict[str, Any]]] = OrderedDict()
 
     _COUNTRY_ALIASES = {
         "usa": "United States",
@@ -124,21 +126,23 @@ class ProfileGateService:
         self,
         user_id: str,
         *,
-        intent: str = "profile_completion",
+        intent: Optional[str] = None,
         chat_id: Optional[str] = None,
         workflow_run_id: Optional[str] = None,
         retry_of_log_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Return a deterministic readiness snapshot for the current user."""
-        cache_key = self._readiness_cache_key(user_id, intent)
+        normalized_intent = intent or "profile_completion"
+        cache_key = self._readiness_cache_key(user_id, normalized_intent)
+        self._prune_readiness_cache()
         cached = self._get_cached_readiness(cache_key)
         if cached is not None:
-            logger.info("profile_readiness_cache_hit", user_id=user_id, intent=intent)
+            logger.info("profile_readiness_cache_hit", user_id=user_id, intent=normalized_intent)
             return cached
 
         started_at = time.perf_counter()
         try:
-            payload = await self.student_profile_client.get_profile_status(user_id=user_id, intent=intent)
+            payload = await self.student_profile_client.get_profile_status(user_id=user_id, intent=normalized_intent)
             await self._record_agent_call(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -183,7 +187,10 @@ class ProfileGateService:
             )
             refresh_started_at = time.perf_counter()
             try:
-                refreshed_payload = await self.student_profile_client.get_profile_status(user_id=user_id, intent=intent)
+                refreshed_payload = await self.student_profile_client.get_profile_status(
+                    user_id=user_id,
+                    intent=normalized_intent,
+                )
                 await self._record_agent_call(
                     user_id=user_id,
                     chat_id=chat_id,
@@ -221,11 +228,11 @@ class ProfileGateService:
             "missing_fields": list(readiness.get("missing_fields") or []),
             "optional_missing_fields": list(readiness.get("optional_missing_fields") or []),
             "updated_at": readiness.get("updated_at"),
-            "intent": intent,
+            "intent": normalized_intent,
         }
         all_missing = set([*result["missing_fields"], *result["optional_missing_fields"]])
-        required_by_intent = self.intent_registry_service.get_effective_required_fields(intent)
-        optional_by_intent = self.intent_registry_service.get_effective_optional_fields(intent)
+        required_by_intent = self.intent_registry_service.get_effective_required_fields(normalized_intent)
+        optional_by_intent = self.intent_registry_service.get_effective_optional_fields(normalized_intent)
 
         result["missing_required_fields"] = [field for field in required_by_intent if field in all_missing]
         result["missing_optional_fields"] = [field for field in optional_by_intent if field in all_missing]
@@ -237,7 +244,7 @@ class ProfileGateService:
             completed=result["completed"],
             missing_required_fields=result["missing_required_fields"],
             missing_optional_fields=result["missing_optional_fields"],
-            intent=intent,
+            intent=normalized_intent,
         )
         if readiness.get("updated_at") is not None:
             self._set_cached_readiness(cache_key, result)
@@ -313,7 +320,7 @@ class ProfileGateService:
         self,
         user_id: str,
         *,
-        intent: str = "profile_completion",
+        intent: Optional[str] = None,
         chat_id: Optional[str] = None,
         workflow_run_id: Optional[str] = None,
         retry_of_log_id: Optional[str] = None,
@@ -501,6 +508,7 @@ class ProfileGateService:
             cls._READINESS_CACHE.pop(cache_key, None)
             return None
 
+        cls._READINESS_CACHE.move_to_end(cache_key)
         return dict(payload)
 
     @classmethod
@@ -509,6 +517,19 @@ class ProfileGateService:
             time.monotonic() + cls._READINESS_CACHE_TTL_SECONDS,
             dict(readiness),
         )
+        cls._READINESS_CACHE.move_to_end(cache_key)
+        cls._prune_readiness_cache()
+
+    @classmethod
+    def _prune_readiness_cache(cls) -> None:
+        now = time.monotonic()
+
+        expired_keys = [key for key, (expires_at, _) in cls._READINESS_CACHE.items() if expires_at <= now]
+        for key in expired_keys:
+            cls._READINESS_CACHE.pop(key, None)
+
+        while len(cls._READINESS_CACHE) > cls._READINESS_CACHE_MAX_ENTRIES:
+            cls._READINESS_CACHE.popitem(last=False)
 
     async def _record_agent_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,

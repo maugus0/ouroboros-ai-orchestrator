@@ -152,6 +152,122 @@ def test_get_chat_workflow_status_returns_states(monkeypatch):
     assert payload["profile_readiness"]["intent"] == "program_discovery"
 
 
+def test_get_chat_workflow_status_returns_executing_for_latest_user_message(monkeypatch):
+    class _StubChatRepo:
+        async def get_by_id_with_user(self, chat_id: str):
+            assert chat_id == "chat-1"
+            return {
+                "id": chat_id,
+                "user_id": "user-1",
+                "status": "active",
+                "deleted_at": None,
+            }
+
+    class _StubMessageRepo:
+        async def list_by_chat(self, *, chat_id: str, limit: int, order: str):
+            assert chat_id == "chat-1"
+            assert limit == 1
+            assert order == "desc"
+            return [
+                {
+                    "id": "msg-1",
+                    "role": "user",
+                    "metadata": None,
+                }
+            ]
+
+    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
+        assert user_id == "user-1"
+        assert intent == "program_discovery"
+        return {
+            "user_id": user_id,
+            "completed": True,
+            "missing_fields": [],
+            "updated_at": "2026-04-12T00:00:00",
+            "intent": intent,
+        }
+
+    def _stub_chat_repo_local():
+        return _StubChatRepo()
+
+    def _stub_message_repo_local():
+        return _StubMessageRepo()
+
+    app.dependency_overrides[get_current_user_id] = _return_user_1
+    monkeypatch.setattr(workflows_api, "_get_chat_repo", _stub_chat_repo_local)
+    monkeypatch.setattr(workflows_api, "_get_message_repo", _stub_message_repo_local)
+    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+
+    response = client.get("/api/v1/workflows/chats/chat-1/status", params={"intent": "program_discovery"})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agent_execution_state"] == "EXECUTING"
+    assert payload["latest_message_id"] == "msg-1"
+
+
+def test_get_chat_workflow_status_returns_success_for_latest_assistant_message(monkeypatch):
+    class _StubChatRepo:
+        async def get_by_id_with_user(self, chat_id: str):
+            assert chat_id == "chat-1"
+            return {
+                "id": chat_id,
+                "user_id": "user-1",
+                "status": "active",
+                "deleted_at": None,
+            }
+
+    class _StubMessageRepo:
+        async def list_by_chat(self, *, chat_id: str, limit: int, order: str):
+            assert chat_id == "chat-1"
+            assert limit == 1
+            assert order == "desc"
+            return [
+                {
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "metadata": {
+                        "profile_gate": {
+                            "allowed": True,
+                        }
+                    },
+                }
+            ]
+
+    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
+        assert user_id == "user-1"
+        assert intent == "program_discovery"
+        return {
+            "user_id": user_id,
+            "completed": True,
+            "missing_fields": [],
+            "updated_at": "2026-04-12T00:00:00",
+            "intent": intent,
+        }
+
+    def _stub_chat_repo_local():
+        return _StubChatRepo()
+
+    def _stub_message_repo_local():
+        return _StubMessageRepo()
+
+    app.dependency_overrides[get_current_user_id] = _return_user_1
+    monkeypatch.setattr(workflows_api, "_get_chat_repo", _stub_chat_repo_local)
+    monkeypatch.setattr(workflows_api, "_get_message_repo", _stub_message_repo_local)
+    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+
+    response = client.get("/api/v1/workflows/chats/chat-1/status", params={"intent": "program_discovery"})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agent_execution_state"] == "SUCCESS"
+    assert payload["latest_message_id"] == "msg-1"
+
+
 def test_get_profile_readiness_returns_intent(monkeypatch):
     async def fake_get_user_readiness(user_id: str, intent: str | None = None):
         assert user_id == "user-1"
@@ -177,6 +293,32 @@ def test_get_profile_readiness_returns_intent(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["intent"] == "scholarship_search"
+    assert payload["completed"] is True
+
+
+def test_get_profile_readiness_defaults_intent_when_missing(monkeypatch):
+    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
+        assert user_id == "user-1"
+        assert intent == "profile_completion"
+        return {
+            "user_id": user_id,
+            "completed": True,
+            "missing_fields": [],
+            "optional_missing_fields": [],
+            "updated_at": "2026-04-12T00:00:00",
+            "intent": intent,
+        }
+
+    app.dependency_overrides[get_current_user_id] = _return_user_1
+    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+
+    response = client.get("/api/v1/workflows/users/me/profile-readiness")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["intent"] == "profile_completion"
     assert payload["completed"] is True
 
 

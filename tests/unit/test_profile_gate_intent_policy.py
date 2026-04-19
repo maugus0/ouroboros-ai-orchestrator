@@ -44,6 +44,37 @@ async def test_get_user_readiness_applies_intent_required_overlay():
 
 
 @pytest.mark.asyncio
+async def test_get_user_readiness_defaults_missing_intent_to_profile_completion():
+    student_profile_client = MagicMock()
+    student_profile_client.get_profile_status = AsyncMock(
+        return_value={
+            "user_id": "user-1",
+            "completed": True,
+            "missing_fields": [],
+            "optional_missing_fields": [],
+            "updated_at": "2026-04-12T00:00:00",
+        }
+    )
+
+    intent_registry = MagicMock()
+    intent_registry.get_effective_required_fields.return_value = []
+    intent_registry.get_effective_optional_fields.return_value = []
+
+    service = ProfileGateService(
+        student_profile_client=student_profile_client,
+        intent_registry_service=intent_registry,
+    )
+
+    readiness = await service.get_user_readiness(user_id="user-1")
+
+    student_profile_client.get_profile_status.assert_awaited_once_with(user_id="user-1", intent="profile_completion")
+    intent_registry.get_effective_required_fields.assert_called_once_with("profile_completion")
+    intent_registry.get_effective_optional_fields.assert_called_once_with("profile_completion")
+    assert readiness["intent"] == "profile_completion"
+    assert readiness["completed"] is True
+
+
+@pytest.mark.asyncio
 async def test_evaluate_gate_uses_intent_conditioned_completion():
     service = ProfileGateService()
     service.get_user_readiness = AsyncMock(

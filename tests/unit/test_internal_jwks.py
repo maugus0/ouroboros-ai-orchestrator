@@ -60,6 +60,21 @@ def test_build_internal_jwks_includes_configured_overlapping_keys(monkeypatch):
         assert entry["alg"] == "RS256"
 
 
+def test_build_internal_jwks_rejects_non_rsa_algorithms(monkeypatch):
+    monkeypatch.setattr("app.security.internal_token_jwks.settings.INTERNAL_TOKEN_PRIVATE_KEY", "")
+    monkeypatch.setattr("app.security.internal_token_jwks.settings.INTERNAL_TOKEN_SIGNING_ALGORITHM", "HS256")
+    monkeypatch.setattr(
+        "app.security.internal_token_jwks.settings.INTERNAL_TOKEN_PUBLIC_KEYS",
+        TEST_INTERNAL_JWKS_JSON,
+    )
+
+    try:
+        build_internal_token_jwks()
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "RSA signing algorithm" in str(exc)
+
+
 def test_internal_jwks_endpoint_returns_cacheable_payload(monkeypatch):
     monkeypatch.setattr("app.api.internal.settings.INTERNAL_TOKEN_JWKS_CACHE_MAX_AGE_SECONDS", 90)
     monkeypatch.setattr(
@@ -83,3 +98,15 @@ def test_internal_jwks_endpoint_returns_503_when_unconfigured(monkeypatch):
         response = client.get("/internal/.well-known/jwks.json")
 
     assert response.status_code == 503
+
+
+def test_internal_jwks_endpoint_returns_503_for_non_rsa_algorithms(monkeypatch):
+    monkeypatch.setattr("app.api.internal.settings.INTERNAL_TOKEN_SIGNING_ALGORITHM", "HS256")
+    monkeypatch.setattr("app.api.internal.settings.INTERNAL_TOKEN_PRIVATE_KEY", "")
+    monkeypatch.setattr("app.api.internal.settings.INTERNAL_TOKEN_PUBLIC_KEYS", TEST_INTERNAL_JWKS_JSON)
+
+    with TestClient(app) as client:
+        response = client.get("/internal/.well-known/jwks.json")
+
+    assert response.status_code == 503
+    assert "RSA signing algorithm" in response.json()["detail"]

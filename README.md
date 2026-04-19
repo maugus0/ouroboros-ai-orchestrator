@@ -380,7 +380,7 @@ Explanation:
 | `OTP_RATE_LIMIT_WINDOW_SECONDS`             | No       | `900`                             | Rate limit window (15 min)                      |
 | `MFA_OTP_DAILY_LIMIT`                       | No       | `10`                              | Max MFA OTPs per user per day                   |
 | **Internal Service JWT**                    |          |                                   |                                                 |
-| `INTERNAL_TOKEN_ENABLED`                    | No       | `true`                            | Enable internal bearer token issuance           |
+| `INTERNAL_TOKEN_ENABLED`                    | No       | `false`                           | Enable internal bearer token issuance           |
 | `INTERNAL_TOKEN_ISSUER`                     | No       | `ouroboros-orchestrator-internal` | Issuer claim for downstream services            |
 | `INTERNAL_TOKEN_TTL_SECONDS`                | No       | `120`                             | Short-lived internal token TTL                  |
 | `INTERNAL_TOKEN_SIGNING_ALGORITHM`          | No       | `RS256`                           | Signing algorithm for internal JWTs             |
@@ -388,7 +388,7 @@ Explanation:
 | `INTERNAL_TOKEN_PRIVATE_KEY`                | Yes      | —                                 | Private key PEM for internal JWTs               |
 | `INTERNAL_TOKEN_PUBLIC_KEYS`                | No       | —                                 | Public keys for JWKS publication/verification   |
 | `INTERNAL_TOKEN_AUDIENCE_MAP`               | No       | `{...}`                           | Target-service audience mapping                 |
-| `INTERNAL_TOKEN_JWKS_CACHE_MAX_AGE_SECONDS` | No       | `300`                             | JWKS cache TTL for downstream verifiers         |
+| `INTERNAL_TOKEN_JWKS_CACHE_MAX_AGE_SECONDS` | No       | `60`                              | JWKS cache TTL for downstream verifiers         |
 | **Downstream Service URLs**                 |          |                                   |                                                 |
 | `STUDENT_PROFILE_SERVICE_URL`               | No       | —                                 | Student profile service base URL                |
 | `PROGRAM_DISCOVERY_SERVICE_URL`             | No       | —                                 | Program discovery service base URL              |

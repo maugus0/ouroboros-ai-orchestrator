@@ -1,5 +1,10 @@
 """Unit tests for rule-first profile extraction from chat turns."""
 
+# Tests intentionally validate internal cache behavior.
+# pylint: disable=protected-access
+
+import time
+
 import pytest
 
 from app.services.profile_gate_service import ProfileGateService
@@ -248,6 +253,64 @@ async def test_get_user_readiness_uses_short_ttl_cache_and_invalidation():
 
     assert student_profile_client.calls == 2
     assert third["completed"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_user_readiness_prunes_expired_and_overflow_entries():
+    class _StubStudentProfileClient:
+        async def get_profile_status(self, user_id: str, intent: str | None = None):
+            return {
+                "data": {
+                    "user_id": user_id,
+                    "completed": True,
+                    "missing_fields": [],
+                    "optional_missing_fields": [],
+                    "updated_at": "2026-04-12T00:00:00",
+                    "intent": intent,
+                }
+            }
+
+    student_profile_client = _StubStudentProfileClient()
+    service = ProfileGateService(
+        student_profile_client=student_profile_client,
+        agent_call_log_repo=object(),
+        intent_registry_service=type(
+            "_StubIntentRegistryService",
+            (),
+            {
+                "get_effective_required_fields": staticmethod(lambda _intent: []),
+                "get_effective_optional_fields": staticmethod(lambda _intent: []),
+            },
+        )(),
+    )
+
+    original_max_entries = ProfileGateService._READINESS_CACHE_MAX_ENTRIES
+    original_ttl_seconds = ProfileGateService._READINESS_CACHE_TTL_SECONDS
+    ProfileGateService._READINESS_CACHE.clear()
+    ProfileGateService._READINESS_CACHE_MAX_ENTRIES = 2
+    ProfileGateService._READINESS_CACHE_TTL_SECONDS = 3600
+
+    try:
+        key_one = service._readiness_cache_key("user-1", "program_discovery")
+        key_two = service._readiness_cache_key("user-2", "program_discovery")
+        key_three = service._readiness_cache_key("user-3", "program_discovery")
+
+        ProfileGateService._READINESS_CACHE[key_one] = (
+            time.monotonic() - 10,
+            {"user_id": "user-1", "completed": True, "updated_at": "2026-04-12T00:00:00"},
+        )
+
+        await service.get_user_readiness("user-2", intent="program_discovery")
+        await service.get_user_readiness("user-3", intent="program_discovery")
+
+        assert key_one not in ProfileGateService._READINESS_CACHE
+        assert key_two in ProfileGateService._READINESS_CACHE
+        assert key_three in ProfileGateService._READINESS_CACHE
+        assert len(ProfileGateService._READINESS_CACHE) == 2
+    finally:
+        ProfileGateService._READINESS_CACHE.clear()
+        ProfileGateService._READINESS_CACHE_MAX_ENTRIES = original_max_entries
+        ProfileGateService._READINESS_CACHE_TTL_SECONDS = original_ttl_seconds
 
 
 def test_extract_country_correction_candidate_even_when_not_missing():

@@ -2,10 +2,12 @@
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Optional
 
@@ -78,7 +80,8 @@ class ChatService:
     """Orchestrates chat session operations."""
 
     _RESPONSE_CACHE_TTL_SECONDS = 90
-    _RESPONSE_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+    _RESPONSE_CACHE_MAX_ENTRIES = 256
+    _RESPONSE_CACHE: OrderedDict[tuple[str, str], tuple[float, dict[str, Any]]] = OrderedDict()
 
     def __init__(
         self,
@@ -112,6 +115,7 @@ class ChatService:
         target_agent: Optional[str],
     ) -> tuple[str, str]:
         normalized_content = re.sub(r"\s+", " ", (content or "").strip()).lower()
+        content_digest = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
         readiness_signature = {
             "allowed": bool(gate.get("allowed")),
             "reason": str(gate.get("reason") or ""),
@@ -121,7 +125,7 @@ class ChatService:
             "target_agent": target_agent or "",
         }
         signature_text = json.dumps(readiness_signature, sort_keys=True, separators=(",", ":"))
-        return chat_id, f"{detected_intent}:{normalized_content}:{signature_text}"
+        return chat_id, f"{detected_intent}:{content_digest}:{signature_text}"
 
     @classmethod
     def _get_cached_response(cls, cache_key: tuple[str, str]) -> Optional[dict[str, Any]]:
@@ -134,11 +138,25 @@ class ChatService:
             cls._RESPONSE_CACHE.pop(cache_key, None)
             return None
 
+        cls._RESPONSE_CACHE.move_to_end(cache_key)
         return dict(payload)
 
     @classmethod
     def _set_cached_response(cls, cache_key: tuple[str, str], payload: dict[str, Any]) -> None:
         cls._RESPONSE_CACHE[cache_key] = (time.monotonic() + cls._RESPONSE_CACHE_TTL_SECONDS, dict(payload))
+        cls._RESPONSE_CACHE.move_to_end(cache_key)
+        cls._evict_expired_and_overflow_entries()
+
+    @classmethod
+    def _evict_expired_and_overflow_entries(cls) -> None:
+        now = time.monotonic()
+
+        expired_keys = [key for key, (expires_at, _) in cls._RESPONSE_CACHE.items() if expires_at <= now]
+        for key in expired_keys:
+            cls._RESPONSE_CACHE.pop(key, None)
+
+        while len(cls._RESPONSE_CACHE) > cls._RESPONSE_CACHE_MAX_ENTRIES:
+            cls._RESPONSE_CACHE.popitem(last=False)
 
     @property
     def chat_repo(self) -> ChatRepository:

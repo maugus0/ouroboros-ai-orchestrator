@@ -10,6 +10,8 @@ from jwt.algorithms import RSAAlgorithm
 
 from app.config import settings
 
+_RSA_SIGNING_ALGORITHMS = {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}
+
 
 def _normalize_key(raw_value: str) -> str:
     value = (raw_value or "").strip()
@@ -34,6 +36,12 @@ def _to_jwk_dict(public_key: Any) -> dict[str, Any]:
 
 def build_internal_token_jwks() -> dict[str, list[dict[str, Any]]]:
     """Build JWKS for active + overlapping verification keys."""
+    signing_algorithm = str(settings.INTERNAL_TOKEN_SIGNING_ALGORITHM or "").upper()
+    if signing_algorithm not in _RSA_SIGNING_ALGORITHMS:
+        raise ValueError(
+            "Internal JWKS requires an RSA signing algorithm (RS256, RS384, RS512, PS256, PS384, or PS512)"
+        )
+
     key_entries: list[tuple[str, str]] = []
 
     if settings.INTERNAL_TOKEN_PRIVATE_KEY:
@@ -51,13 +59,17 @@ def build_internal_token_jwks() -> dict[str, list[dict[str, Any]]]:
         if not key_pem:
             continue
 
-        public_key = _to_public_key_object(key_pem)
+        try:
+            public_key = _to_public_key_object(key_pem)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Internal JWKS requires RSA PEM key material for configured signing keys") from exc
+
         jwk = _to_jwk_dict(public_key)
         jwk.update(
             {
                 "kid": kid,
                 "use": "sig",
-                "alg": settings.INTERNAL_TOKEN_SIGNING_ALGORITHM,
+                "alg": signing_algorithm,
             }
         )
         jwk_keys.append(jwk)

@@ -12,7 +12,11 @@ router = APIRouter(prefix="/internal", tags=["Internal"])
 @router.get("/.well-known/jwks.json")
 async def get_internal_jwks() -> JSONResponse:
     """Expose internal token verification keys for downstream services."""
-    jwks = build_internal_token_jwks()
+    try:
+        jwks = build_internal_token_jwks()
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     if not jwks["keys"]:
         raise HTTPException(status_code=503, detail="Internal JWKS is not configured")
 

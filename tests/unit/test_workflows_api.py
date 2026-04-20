@@ -1,11 +1,14 @@
 """Tests for workflow visibility endpoints."""
 
-from fastapi import HTTPException
+# pylint: disable=protected-access
+
+from fastapi import Depends, HTTPException
 from fastapi.testclient import TestClient
 
 from app.api import workflows as workflows_api
 from app.main import app
 from app.middleware.auth_middleware import get_current_user_id
+from app.services.profile_gate_service import ProfileGateService
 
 client = TestClient(app)
 
@@ -30,10 +33,10 @@ def _stub_chat_repo():
 
 def _stub_message_repo():
     class _StubMessageRepo:
-        async def list_by_chat(self, **kwargs):
-            assert kwargs["chat_id"] == "chat-1"
-            assert kwargs["limit"] == 1
-            assert kwargs["order"] == "desc"
+        async def list_by_chat(self, **_kwargs):
+            assert _kwargs["chat_id"] == "chat-1"
+            assert _kwargs["limit"] == 1
+            assert _kwargs["order"] == "desc"
             return [
                 {
                     "id": "msg-1",
@@ -51,14 +54,14 @@ def _stub_message_repo():
 
 def _stub_student_profile_client():
     class _StubStudentProfileClient:
-        async def parse_document_upload(self, **kwargs):
-            assert kwargs["user_id"] == "user-1"
-            assert kwargs["file_name"] == "cv.pdf"
-            assert kwargs["file_content_base64"]
-            assert kwargs["intent"] == "profile_completion"
-            assert kwargs["document_type"] == "cv"
-            assert kwargs["target_degree_hint"] == "master"
-            assert kwargs["run_gap_analysis"] is True
+        async def parse_document_upload(self, **_kwargs):
+            assert _kwargs["user_id"] == "user-1"
+            assert _kwargs["file_name"] == "cv.pdf"
+            assert _kwargs["file_content_base64"]
+            assert _kwargs["intent"] == "profile_completion"
+            assert _kwargs["document_type"] == "cv"
+            assert _kwargs["target_degree_hint"] == "master"
+            assert _kwargs["run_gap_analysis"] is True
             return {
                 "profile_id": "profile-1",
                 "llm_model": "gpt-test",
@@ -95,7 +98,7 @@ def _stub_chat_service_raises():
     return _StubChatService()
 
 
-def test_get_chat_workflow_status_returns_states(monkeypatch):
+def test_get_chat_workflow_status_returns_states():
     class _StubChatRepo:
         async def get_by_id_with_user(self, chat_id: str):
             assert chat_id == "chat-1"
@@ -123,21 +126,31 @@ def test_get_chat_workflow_status_returns_states(monkeypatch):
                 }
             ]
 
-    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
-        assert user_id == "user-1"
-        assert intent == "program_discovery"
-        return {
-            "user_id": user_id,
-            "completed": False,
-            "missing_fields": ["email"],
-            "updated_at": "2026-04-12T00:00:00",
-            "intent": intent,
-        }
+    class _StubProfileGateService:
+        async def get_user_readiness(self, user_id: str, intent: str | None = None):
+            assert user_id == "user-1"
+            assert intent == "program_discovery"
+            return {
+                "user_id": user_id,
+                "completed": False,
+                "missing_fields": ["email"],
+                "updated_at": "2026-04-12T00:00:00",
+                "intent": intent,
+            }
+
+    def _stub_chat_repo_factory():
+        return _StubChatRepo()
+
+    def _stub_message_repo_factory():
+        return _StubMessageRepo()
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
 
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_chat_repo", _stub_chat_repo)
-    monkeypatch.setattr(workflows_api, "_get_message_repo", _stub_message_repo)
-    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+    app.dependency_overrides[workflows_api._get_chat_repo] = _stub_chat_repo_factory
+    app.dependency_overrides[workflows_api._get_message_repo] = _stub_message_repo_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.get("/api/v1/workflows/chats/chat-1/status", params={"intent": "program_discovery"})
 
@@ -152,7 +165,7 @@ def test_get_chat_workflow_status_returns_states(monkeypatch):
     assert payload["profile_readiness"]["intent"] == "program_discovery"
 
 
-def test_get_chat_workflow_status_returns_executing_for_latest_user_message(monkeypatch):
+def test_get_chat_workflow_status_returns_executing_for_latest_user_message():
     class _StubChatRepo:
         async def get_by_id_with_user(self, chat_id: str):
             assert chat_id == "chat-1"
@@ -176,27 +189,31 @@ def test_get_chat_workflow_status_returns_executing_for_latest_user_message(monk
                 }
             ]
 
-    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
-        assert user_id == "user-1"
-        assert intent == "program_discovery"
-        return {
-            "user_id": user_id,
-            "completed": True,
-            "missing_fields": [],
-            "updated_at": "2026-04-12T00:00:00",
-            "intent": intent,
-        }
+    class _StubProfileGateService:
+        async def get_user_readiness(self, user_id: str, intent: str | None = None):
+            assert user_id == "user-1"
+            assert intent == "program_discovery"
+            return {
+                "user_id": user_id,
+                "completed": True,
+                "missing_fields": [],
+                "updated_at": "2026-04-12T00:00:00",
+                "intent": intent,
+            }
 
-    def _stub_chat_repo_local():
+    def _stub_chat_repo_factory():
         return _StubChatRepo()
 
-    def _stub_message_repo_local():
+    def _stub_message_repo_factory():
         return _StubMessageRepo()
 
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_chat_repo", _stub_chat_repo_local)
-    monkeypatch.setattr(workflows_api, "_get_message_repo", _stub_message_repo_local)
-    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+    app.dependency_overrides[workflows_api._get_chat_repo] = _stub_chat_repo_factory
+    app.dependency_overrides[workflows_api._get_message_repo] = _stub_message_repo_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.get("/api/v1/workflows/chats/chat-1/status", params={"intent": "program_discovery"})
 
@@ -208,7 +225,7 @@ def test_get_chat_workflow_status_returns_executing_for_latest_user_message(monk
     assert payload["latest_message_id"] == "msg-1"
 
 
-def test_get_chat_workflow_status_returns_success_for_latest_assistant_message(monkeypatch):
+def test_get_chat_workflow_status_returns_success_for_latest_assistant_message():
     class _StubChatRepo:
         async def get_by_id_with_user(self, chat_id: str):
             assert chat_id == "chat-1"
@@ -236,27 +253,31 @@ def test_get_chat_workflow_status_returns_success_for_latest_assistant_message(m
                 }
             ]
 
-    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
-        assert user_id == "user-1"
-        assert intent == "program_discovery"
-        return {
-            "user_id": user_id,
-            "completed": True,
-            "missing_fields": [],
-            "updated_at": "2026-04-12T00:00:00",
-            "intent": intent,
-        }
+    class _StubProfileGateService:
+        async def get_user_readiness(self, user_id: str, intent: str | None = None):
+            assert user_id == "user-1"
+            assert intent == "program_discovery"
+            return {
+                "user_id": user_id,
+                "completed": True,
+                "missing_fields": [],
+                "updated_at": "2026-04-12T00:00:00",
+                "intent": intent,
+            }
 
-    def _stub_chat_repo_local():
+    def _stub_chat_repo_factory():
         return _StubChatRepo()
 
-    def _stub_message_repo_local():
+    def _stub_message_repo_factory():
         return _StubMessageRepo()
 
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_chat_repo", _stub_chat_repo_local)
-    monkeypatch.setattr(workflows_api, "_get_message_repo", _stub_message_repo_local)
-    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+    app.dependency_overrides[workflows_api._get_chat_repo] = _stub_chat_repo_factory
+    app.dependency_overrides[workflows_api._get_message_repo] = _stub_message_repo_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.get("/api/v1/workflows/chats/chat-1/status", params={"intent": "program_discovery"})
 
@@ -268,23 +289,27 @@ def test_get_chat_workflow_status_returns_success_for_latest_assistant_message(m
     assert payload["latest_message_id"] == "msg-1"
 
 
-def test_get_profile_readiness_returns_intent(monkeypatch):
-    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
-        assert user_id == "user-1"
-        assert intent == "scholarship_search"
-        return {
-            "user_id": user_id,
-            "completed": True,
-            "missing_fields": [],
-            "optional_missing_fields": [],
-            "updated_at": "2026-04-12T00:00:00",
-            "intent": intent,
-            "missing_required_fields": [],
-            "missing_optional_fields": [],
-        }
+def test_get_profile_readiness_returns_intent():
+    class _StubProfileGateService:
+        async def get_user_readiness(self, user_id: str, intent: str | None = None):
+            assert user_id == "user-1"
+            assert intent == "scholarship_search"
+            return {
+                "user_id": user_id,
+                "completed": True,
+                "missing_fields": [],
+                "optional_missing_fields": [],
+                "updated_at": "2026-04-12T00:00:00",
+                "intent": intent,
+                "missing_required_fields": [],
+                "missing_optional_fields": [],
+            }
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
 
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.get("/api/v1/workflows/users/me/profile-readiness", params={"intent": "scholarship_search"})
 
@@ -296,21 +321,25 @@ def test_get_profile_readiness_returns_intent(monkeypatch):
     assert payload["completed"] is True
 
 
-def test_get_profile_readiness_defaults_intent_when_missing(monkeypatch):
-    async def fake_get_user_readiness(user_id: str, intent: str | None = None):
-        assert user_id == "user-1"
-        assert intent == "profile_completion"
-        return {
-            "user_id": user_id,
-            "completed": True,
-            "missing_fields": [],
-            "optional_missing_fields": [],
-            "updated_at": "2026-04-12T00:00:00",
-            "intent": intent,
-        }
+def test_get_profile_readiness_defaults_intent_when_missing():
+    class _StubProfileGateService:
+        async def get_user_readiness(self, user_id: str, intent: str | None = None):
+            assert user_id == "user-1"
+            assert intent == "profile_completion"
+            return {
+                "user_id": user_id,
+                "completed": True,
+                "missing_fields": [],
+                "optional_missing_fields": [],
+                "updated_at": "2026-04-12T00:00:00",
+                "intent": intent,
+            }
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
 
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api.profile_gate_service, "get_user_readiness", fake_get_user_readiness)
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.get("/api/v1/workflows/users/me/profile-readiness")
 
@@ -322,16 +351,32 @@ def test_get_profile_readiness_defaults_intent_when_missing(monkeypatch):
     assert payload["completed"] is True
 
 
-def test_get_chat_workflow_status_not_found(monkeypatch):
+def test_get_chat_workflow_status_not_found():
     class _StubChatRepo:
         async def get_by_id_with_user(self, _chat_id: str):
             return None
 
-    def _stub_chat_repo_missing():
+    class _StubMessageRepo:
+        async def list_by_chat(self, **_kwargs):
+            return []
+
+    class _StubProfileGateService:
+        async def get_user_readiness(self, _user_id: str, _intent: str | None = None):
+            return {"completed": False, "missing_fields": [], "updated_at": None}
+
+    def _stub_chat_repo_factory():
         return _StubChatRepo()
 
+    def _stub_message_repo_factory():
+        return _StubMessageRepo()
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_chat_repo", _stub_chat_repo_missing)
+    app.dependency_overrides[workflows_api._get_chat_repo] = _stub_chat_repo_factory
+    app.dependency_overrides[workflows_api._get_message_repo] = _stub_message_repo_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.get("/api/v1/workflows/chats/missing/status")
 
@@ -341,9 +386,38 @@ def test_get_chat_workflow_status_not_found(monkeypatch):
     assert response.json()["detail"] == "Chat not found"
 
 
-def test_retry_last_agent_call(monkeypatch):
+def test_retry_last_agent_call():
+    class _StubProfileGateService:
+        async def get_user_readiness(self, _user_id: str, _intent: str | None = None):
+            return {"completed": True}
+
+    class _StubChatService:
+        def __init__(self, profile_gate_service: ProfileGateService):
+            self.profile_gate_service = profile_gate_service
+
+        async def retry_last_agent_call(self, user_id: str, chat_id: str):
+            assert user_id == "user-1"
+            assert chat_id == "chat-1"
+            return {
+                "chat_id": chat_id,
+                "retried": True,
+                "source_message_id": "msg-user-1",
+                "assistant_message": {"id": "msg-assistant-1"},
+                "profile_gate": {"allowed": True},
+                "chat": {"id": chat_id},
+            }
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
+    def _stub_chat_service_factory(
+        profile_gate_service: ProfileGateService = Depends(workflows_api._get_profile_gate_service),
+    ):
+        return _StubChatService(profile_gate_service)
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_chat_service", _stub_chat_service)
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
+    app.dependency_overrides[workflows_api._get_chat_service] = _stub_chat_service_factory
 
     response = client.post("/api/v1/workflows/chats/chat-1/retry-last-agent-call")
 
@@ -356,9 +430,31 @@ def test_retry_last_agent_call(monkeypatch):
     assert payload["source_message_id"] == "msg-user-1"
 
 
-def test_retry_last_agent_call_no_message(monkeypatch):
+def test_retry_last_agent_call_no_message():
+    class _StubProfileGateService:
+        async def get_user_readiness(self, _user_id: str, _intent: str | None = None):
+            return {"completed": True}
+
+    class _StubChatServiceRaises:
+        def __init__(self, profile_gate_service: ProfileGateService):
+            self.profile_gate_service = profile_gate_service
+
+        async def retry_last_agent_call(self, user_id: str, chat_id: str):
+            assert user_id == "user-1"
+            assert chat_id == "chat-1"
+            raise HTTPException(status_code=400, detail="No user message available to retry")
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
+    def _stub_chat_service_raises_factory(
+        profile_gate_service: ProfileGateService = Depends(workflows_api._get_profile_gate_service),
+    ):
+        return _StubChatServiceRaises(profile_gate_service)
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_chat_service", _stub_chat_service_raises)
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
+    app.dependency_overrides[workflows_api._get_chat_service] = _stub_chat_service_raises_factory
 
     response = client.post("/api/v1/workflows/chats/chat-1/retry-last-agent-call")
 
@@ -368,9 +464,20 @@ def test_retry_last_agent_call_no_message(monkeypatch):
     assert response.json()["detail"] == "No user message available to retry"
 
 
-def test_profile_upload_forwards_to_student_profile(monkeypatch):
+def test_profile_upload_forwards_to_student_profile():
+    class _StubProfileGateService:
+        def invalidate_readiness_cache(self, _user_id: str, _intent: str | None = None):
+            pass
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
+    def _stub_student_profile_client_factory():
+        return _stub_student_profile_client()
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_student_profile_client", _stub_student_profile_client)
+    app.dependency_overrides[workflows_api._get_student_profile_client] = _stub_student_profile_client_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.post(
         "/api/v1/workflows/profile-upload",
@@ -392,24 +499,27 @@ def test_profile_upload_forwards_to_student_profile(monkeypatch):
     assert payload["gap_analysis"]["readiness_score"] == 0.5
 
 
-def test_profile_upload_invalidates_readiness_cache(monkeypatch):
+def test_profile_upload_invalidates_readiness_cache():
     invalidated: list[tuple[str, str | None]] = []
 
     class _StubStudentProfileClient:
-        async def parse_document_upload(self, **kwargs):
-            assert kwargs["user_id"] == "user-1"
+        async def parse_document_upload(self, **_kwargs):
+            assert _kwargs["user_id"] == "user-1"
             return {"profile_id": "profile-1"}
 
     class _StubProfileGateService:
         def invalidate_readiness_cache(self, user_id: str, intent: str | None = None):
             invalidated.append((user_id, intent))
 
-    def _stub_student_profile_client_local():
+    def _stub_student_profile_client_factory():
         return _StubStudentProfileClient()
 
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
     app.dependency_overrides[get_current_user_id] = _return_user_1
-    monkeypatch.setattr(workflows_api, "_get_student_profile_client", _stub_student_profile_client_local)
-    monkeypatch.setattr(workflows_api, "profile_gate_service", _StubProfileGateService())
+    app.dependency_overrides[workflows_api._get_student_profile_client] = _stub_student_profile_client_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
 
     response = client.post(
         "/api/v1/workflows/profile-upload",

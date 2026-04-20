@@ -128,19 +128,19 @@ class AgentClient:
             before_sleep=lambda state: self._log_before_sleep(state, method, url),
         )
 
-        try:
-            async for attempt in retryer:
-                attempt_number = attempt.retry_state.attempt_number
-                logger.info(
-                    "agent_request_started",
-                    service_name=self.service_name,
-                    method=method.upper(),
-                    url=url,
-                    attempt=attempt_number,
-                    max_attempts=attempts,
-                )
-                with attempt:
-                    async with self._create_http_client() as client:
+        async with self._create_http_client() as client:
+            try:
+                async for attempt in retryer:
+                    attempt_number = attempt.retry_state.attempt_number
+                    logger.info(
+                        "agent_request_started",
+                        service_name=self.service_name,
+                        method=method.upper(),
+                        url=url,
+                        attempt=attempt_number,
+                        max_attempts=attempts,
+                    )
+                    with attempt:
                         response = await client.request(
                             method=method.upper(),
                             url=url,
@@ -149,44 +149,44 @@ class AgentClient:
                             headers=headers,
                         )
 
-                    if response.status_code >= 500:
-                        raise httpx.HTTPStatusError(
-                            message=f"{self.service_name} returned {response.status_code}",
-                            request=response.request,
-                            response=response,
+                        if response.status_code >= 500:
+                            raise httpx.HTTPStatusError(
+                                message=f"{self.service_name} returned {response.status_code}",
+                                request=response.request,
+                                response=response,
+                            )
+                        response.raise_for_status()
+
+                        logger.info(
+                            "agent_request_succeeded",
+                            service_name=self.service_name,
+                            method=method.upper(),
+                            url=url,
+                            status_code=response.status_code,
+                            attempt=attempt_number,
                         )
-                    response.raise_for_status()
 
-                    logger.info(
-                        "agent_request_succeeded",
-                        service_name=self.service_name,
-                        method=method.upper(),
-                        url=url,
-                        status_code=response.status_code,
-                        attempt=attempt_number,
-                    )
+                        if not response.content:
+                            return None
+                        return response.json()
+            except self._retryable_exceptions() as exc:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                response_text = getattr(getattr(exc, "response", None), "text", None)
+                logger.warning(
+                    "agent_request_failed",
+                    service_name=self.service_name,
+                    method=method.upper(),
+                    url=url,
+                    attempt=attempts,
+                    max_attempts=attempts,
+                    status_code=status_code,
+                    error=str(exc),
+                )
+                raise AgentClientError(
+                    service_name=self.service_name,
+                    message=f"{self.service_name} request failed",
+                    status_code=status_code,
+                    response_text=response_text,
+                ) from exc
 
-                    if not response.content:
-                        return None
-                    return response.json()
-        except self._retryable_exceptions() as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            response_text = getattr(getattr(exc, "response", None), "text", None)
-            logger.warning(
-                "agent_request_failed",
-                service_name=self.service_name,
-                method=method.upper(),
-                url=url,
-                attempt=attempts,
-                max_attempts=attempts,
-                status_code=status_code,
-                error=str(exc),
-            )
-            raise AgentClientError(
-                service_name=self.service_name,
-                message=f"{self.service_name} request failed",
-                status_code=status_code,
-                response_text=response_text,
-            ) from exc
-
-        raise AgentClientError(service_name=self.service_name, message=f"{self.service_name} request failed")
+            raise AgentClientError(service_name=self.service_name, message=f"{self.service_name} request failed")

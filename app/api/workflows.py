@@ -15,7 +15,9 @@ from app.services.profile_gate_service import ProfileGateService
 
 router = APIRouter(prefix="/api/v1/workflows", tags=["Workflows"])
 
-profile_gate_service = ProfileGateService()
+
+def _get_profile_gate_service() -> ProfileGateService:
+    return ProfileGateService()
 
 
 def _get_chat_repo() -> ChatRepository:
@@ -26,7 +28,7 @@ def _get_message_repo() -> MessageRepository:
     return MessageRepository(get_pool())
 
 
-def _get_chat_service() -> ChatService:
+def _get_chat_service(profile_gate_service: ProfileGateService = Depends(_get_profile_gate_service)) -> ChatService:
     return ChatService(profile_gate_service=profile_gate_service)
 
 
@@ -38,6 +40,7 @@ def _get_student_profile_client() -> StudentProfileClient:
 async def get_my_profile_readiness(
     user_id: str = Depends(get_current_user_id),
     intent: str | None = Query(default=None),
+    profile_gate_service: ProfileGateService = Depends(_get_profile_gate_service),
 ):
     """Return the current user's profile readiness snapshot."""
     normalized_intent = intent or "profile_completion"
@@ -49,15 +52,18 @@ async def get_chat_workflow_status(
     chat_id: str,
     user_id: str = Depends(get_current_user_id),
     intent: str | None = Query(default=None),
+    chat_repo: ChatRepository = Depends(_get_chat_repo),
+    message_repo: MessageRepository = Depends(_get_message_repo),
+    profile_gate_service: ProfileGateService = Depends(_get_profile_gate_service),
 ):
     """Return chat lifecycle state, profile readiness state, and latest execution state."""
-    chat = await _get_chat_repo().get_by_id_with_user(chat_id)
+    chat = await chat_repo.get_by_id_with_user(chat_id)
     if not chat or chat.get("user_id") != user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat not found")
 
     normalized_intent = intent or "profile_completion"
     readiness = await profile_gate_service.get_user_readiness(user_id, intent=normalized_intent)
-    messages = await _get_message_repo().list_by_chat(chat_id=chat_id, limit=1, order="desc")
+    messages = await message_repo.list_by_chat(chat_id=chat_id, limit=1, order="desc")
     latest_message = messages[0] if messages else None
 
     return {
@@ -71,9 +77,13 @@ async def get_chat_workflow_status(
 
 
 @router.post("/chats/{chat_id}/retry-last-agent-call")
-async def retry_last_agent_call(chat_id: str, user_id: str = Depends(get_current_user_id)):
+async def retry_last_agent_call(
+    chat_id: str,
+    user_id: str = Depends(get_current_user_id),
+    chat_service: ChatService = Depends(_get_chat_service),
+):
     """Retry the latest chat request by replaying the newest user message."""
-    return await _get_chat_service().retry_last_agent_call(user_id=user_id, chat_id=chat_id)
+    return await chat_service.retry_last_agent_call(user_id=user_id, chat_id=chat_id)
 
 
 @router.post("/profile-upload")
@@ -84,12 +94,14 @@ async def upload_profile_document(
     target_degree_hint: str | None = Form(default=None),
     run_gap_analysis: bool = Form(default=False),
     user_id: str = Depends(get_current_user_id),
+    student_profile_client: StudentProfileClient = Depends(_get_student_profile_client),
+    profile_gate_service: ProfileGateService = Depends(_get_profile_gate_service),
 ):
     """Forward a CV/transcript upload from orchestrator to student-profile processing."""
     raw_bytes = await file.read()
     file_content_base64 = base64.b64encode(raw_bytes).decode("utf-8")
 
-    result = await _get_student_profile_client().parse_document_upload(
+    result = await student_profile_client.parse_document_upload(
         user_id=user_id,
         file_name=file.filename or "uploaded_file",
         file_content_base64=file_content_base64,

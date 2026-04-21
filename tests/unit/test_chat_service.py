@@ -63,6 +63,8 @@ def mock_profile_gate_service():
     service = MagicMock()
     service.evaluate_gate = AsyncMock()
     service.collect_profile_updates_from_chat = AsyncMock()
+    service.get_profile_clarifications = AsyncMock()
+    service.submit_profile_clarification_answers = AsyncMock()
     return service
 
 
@@ -831,6 +833,154 @@ async def test_send_message_out_of_scope_is_overridden_during_profile_clarificat
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
     assert assistant_kwargs["metadata"]["intent"] == "profile_completion"
+
+
+@pytest.mark.asyncio
+async def test_send_message_uses_clarification_question_from_student_profile(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Profile gate failures should render the fetched clarification question in chat."""
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["current_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["current_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {"applied_fields": []}
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "status": "needs_clarification",
+        "clarification_queue": [
+            {"field": "current_degree_level", "question": "What is your current degree level?"}
+        ],
+        "react_decision_trace": {
+            "current_degree_level": {"decision": "clarify", "reason": "missing_or_unknown"}
+        },
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = []
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="master",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["content"] == "What is your current degree level?"
+    assert assistant_kwargs["metadata"]["profile_gate"]["profile_id"] == "profile-1"
+
+
+@pytest.mark.asyncio
+async def test_send_message_binary_reply_routes_to_react_clarification_submission(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Binary replies to a ReAct yes/no question should submit clarification instead of field extraction."""
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["target_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["target_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "status": "needs_clarification",
+        "clarification_queue": [
+            {
+                "field": "publications",
+                "question": "Do you have publications? Please provide title, venue, and year if available.",
+            }
+        ],
+    }
+    mock_profile_gate_service.submit_profile_clarification_answers.return_value = {
+        "profile_id": "profile-1",
+        "applied_fields": ["publications"],
+        "clarification_queue": [
+            {
+                "field": "target_degree_level",
+                "question": "What is your target degree level?",
+            }
+        ],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = [
+        {
+            "id": "assistant-prev-1",
+            "role": "assistant",
+            "content": "Do you have publications? Please provide title, venue, and year if available.",
+            "metadata": {
+                "source": "profile_upload_followup",
+                "profile_gate": {
+                    "allowed": False,
+                    "reason": "profile_incomplete_for_intent",
+                },
+            },
+        }
+    ]
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="No",
+    )
+
+    mock_profile_gate_service.collect_profile_updates_from_chat.assert_not_awaited()
+    mock_profile_gate_service.submit_profile_clarification_answers.assert_awaited_once()
+    submit_kwargs = mock_profile_gate_service.submit_profile_clarification_answers.call_args.kwargs
+    assert submit_kwargs["answers"] == [{"field": "publications", "value": "No"}]
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["content"] == "What is your target degree level?"
 
 
 @pytest.mark.asyncio

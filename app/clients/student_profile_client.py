@@ -68,6 +68,56 @@ class StudentProfileClient(AgentClient):
             ),
         )
 
+    async def get_profile_clarifications(
+        self,
+        profile_id: str,
+        *,
+        user_id: str,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Fetch unresolved clarifications and the latest ReAct trace for a profile."""
+        return await self.request(
+            "GET",
+            f"/api/v1/profiles/{profile_id}/clarifications",
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def submit_profile_clarifications(
+        self,
+        profile_id: str,
+        *,
+        user_id: str,
+        answers: list[dict[str, Any]],
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Submit clarification answers for a profile and return refreshed queue/trace."""
+        return await self.request(
+            "POST",
+            f"/api/v1/profiles/{profile_id}/clarifications",
+            json={"answers": answers},
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
     async def sync_user_profile(
         self,
         user_id: str,

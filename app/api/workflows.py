@@ -121,6 +121,15 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
             target_degree_hint=target_degree_hint,
             run_gap_analysis=run_gap_analysis,
         )
+        profile_data = result.get("data") if isinstance(result.get("data"), dict) else None
+        profile_id = profile_data.get("profile_id") if isinstance(profile_data, dict) else None
+        if isinstance(profile_data, dict) and isinstance(profile_id, str) and profile_id:
+            clarifications = await profile_gate_service.get_profile_clarifications(user_id, profile_id)
+            if isinstance(clarifications, dict):
+                profile_data["clarification_queue"] = clarifications.get("clarification_queue", profile_data.get("clarification_queue", []))
+                profile_data["react_decision_trace"] = clarifications.get(
+                    "react_decision_trace", profile_data.get("react_decision_trace", {})
+                )
         profile_gate_service.invalidate_readiness_cache(user_id, intent)
 
         if chat_id:

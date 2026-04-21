@@ -459,22 +459,60 @@ class ChatService:
                     target_agent = cached_response.get("target_agent", target_agent)
                 else:
                     collected_from_chat: dict[str, Any] | None = None
+                    clarification_question: Optional[str] = None
 
                     if not gate["allowed"]:
-                        missing_fields = _as_string_list(
-                            gate.get("missing_required_fields") or gate.get("missing_fields") or []
-                        )
-                        collected_from_chat = await self.profile_gate_service.collect_profile_updates_from_chat(
-                            user_id=user_id,
-                            content=content,
-                            missing_fields=missing_fields,
-                            chat_id=chat_id,
-                            message_id=user_message_id,
-                            workflow_run_id=workflow_run_id,
-                            retry_of_log_id=retry_of_log_id,
-                        )
-                        if not isinstance(collected_from_chat, dict):
-                            collected_from_chat = None
+                        clarification_submission: dict[str, Any] | None = None
+                        routed_to_react_clarification = False
+                        profile_id = gate.get("profile_id")
+
+                        if (
+                            profile_id
+                            and self._is_binary_reply(content)
+                            and self._is_binary_clarification_prompt(latest_assistant_message)
+                        ):
+                            clarifications_before = await self.profile_gate_service.get_profile_clarifications(
+                                user_id=user_id,
+                                profile_id=str(profile_id),
+                                chat_id=chat_id,
+                                workflow_run_id=workflow_run_id,
+                                retry_of_log_id=retry_of_log_id,
+                            )
+                            first_clarification_field = self._extract_clarification_field(clarifications_before)
+                            if first_clarification_field:
+                                clarification_submission = (
+                                    await self.profile_gate_service.submit_profile_clarification_answers(
+                                        user_id=user_id,
+                                        profile_id=str(profile_id),
+                                        answers=[
+                                            {
+                                                "field": first_clarification_field,
+                                                "value": content.strip(),
+                                            }
+                                        ],
+                                        chat_id=chat_id,
+                                        workflow_run_id=workflow_run_id,
+                                        retry_of_log_id=retry_of_log_id,
+                                    )
+                                )
+                                routed_to_react_clarification = clarification_submission is not None
+
+                        if not routed_to_react_clarification:
+                            missing_fields = _as_string_list(
+                                gate.get("missing_required_fields") or gate.get("missing_fields") or []
+                            )
+                            collected_from_chat = await self.profile_gate_service.collect_profile_updates_from_chat(
+                                user_id=user_id,
+                                content=content,
+                                missing_fields=missing_fields,
+                                chat_id=chat_id,
+                                message_id=user_message_id,
+                                workflow_run_id=workflow_run_id,
+                                retry_of_log_id=retry_of_log_id,
+                            )
+                            if not isinstance(collected_from_chat, dict):
+                                collected_from_chat = None
+
                         gate = await self.profile_gate_service.evaluate_gate(
                             user_id,
                             intent=detected_intent,
@@ -482,6 +520,17 @@ class ChatService:
                             workflow_run_id=workflow_run_id,
                             retry_of_log_id=retry_of_log_id,
                         )
+                        if gate.get("profile_id"):
+                            clarifications = clarification_submission
+                            if not isinstance(clarifications, dict):
+                                clarifications = await self.profile_gate_service.get_profile_clarifications(
+                                    user_id=user_id,
+                                    profile_id=str(gate["profile_id"]),
+                                    chat_id=chat_id,
+                                    workflow_run_id=workflow_run_id,
+                                    retry_of_log_id=retry_of_log_id,
+                                )
+                            clarification_question = self._extract_clarification_question(clarifications)
 
                     assistant_content, gate = await self._resolve_assistant_content(
                         gate=gate,
@@ -1170,6 +1219,7 @@ class ChatService:
         missing_fields: list[str],
         applied_fields: Optional[list[str]] = None,
         pending_clarification_fields: Optional[list[str]] = None,
+        clarification_question: Optional[str] = None,
     ) -> str:
         """Return a deterministic guidance message when profile completion is required."""
         if not missing_fields:
@@ -1177,6 +1227,13 @@ class ChatService:
                 "I need to finish your profile before I can continue with scholarship and program help. "
                 "Please update your profile and try again."
             )
+
+        if clarification_question:
+            applied = [self._format_profile_field_label(field) for field in (applied_fields or []) if field]
+            if applied:
+                applied_text = self._join_humanized_labels(applied)
+                return f"Great, I saved your {applied_text}. {clarification_question}"
+            return clarification_question
 
         first_missing = self._format_profile_field_label(missing_fields[0])
         applied = [self._format_profile_field_label(field) for field in (applied_fields or []) if field]
@@ -1202,6 +1259,78 @@ class ChatService:
             "I can help with scholarships and program searches, but I need to finish your profile first. "
             f"Let's start with your {first_missing}. Once you send that, I'll ask for the next detail."
         )
+
+    @staticmethod
+    def _extract_clarification_question(clarifications: Optional[dict[str, Any]]) -> Optional[str]:
+        if not isinstance(clarifications, dict):
+            return None
+
+        queue = clarifications.get("clarification_queue")
+        if not isinstance(queue, list) or not queue:
+            return None
+
+        first_item = queue[0]
+        if not isinstance(first_item, dict):
+            return None
+
+        question = first_item.get("question")
+        if isinstance(question, str) and question.strip():
+            return question.strip()
+        return None
+
+    @staticmethod
+    def _extract_clarification_field(clarifications: Optional[dict[str, Any]]) -> Optional[str]:
+        if not isinstance(clarifications, dict):
+            return None
+
+        queue = clarifications.get("clarification_queue")
+        if not isinstance(queue, list) or not queue:
+            return None
+
+        first_item = queue[0]
+        if not isinstance(first_item, dict):
+            return None
+
+        field = first_item.get("field")
+        if isinstance(field, str) and field.strip():
+            return field.strip()
+        return None
+
+    @staticmethod
+    def _is_binary_reply(content: str) -> bool:
+        normalized = re.sub(r"[^a-z]", "", (content or "").strip().lower())
+        return normalized in {
+            "yes",
+            "y",
+            "yeah",
+            "yep",
+            "no",
+            "n",
+            "nope",
+            "nah",
+        }
+
+    @classmethod
+    def _is_binary_clarification_prompt(cls, latest_assistant_message: Optional[dict[str, Any]]) -> bool:
+        if not isinstance(latest_assistant_message, dict):
+            return False
+
+        content = str(latest_assistant_message.get("content") or "").strip()
+        if not content:
+            return False
+
+        metadata = latest_assistant_message.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+
+        profile_gate = metadata.get("profile_gate")
+        if not isinstance(profile_gate, dict) or profile_gate.get("allowed") is not False:
+            return False
+
+        if re.search(r"\b(do|did|have|has|are|is|was|were|can|could|would|will|should)\b", content, re.IGNORECASE):
+            return "?" in content
+
+        return bool(re.search(r"\byes|no\b", content, re.IGNORECASE))
 
     @staticmethod
     def _format_profile_field_label(field: str) -> str:

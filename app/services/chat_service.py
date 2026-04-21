@@ -1,5 +1,7 @@
 """Chat session business logic — create, send messages, list, delete."""
 
+# pylint: disable=too-many-lines
+
 import base64
 import binascii
 import hashlib
@@ -484,6 +486,7 @@ class ChatService:
                     assistant_content, gate = await self._resolve_assistant_content(
                         gate=gate,
                         collected_from_chat=collected_from_chat,
+                        clarification_question=clarification_question,
                         detected_intent=detected_intent,
                         target_agent=target_agent,
                         user_id=user_id,
@@ -1134,6 +1137,7 @@ class ChatService:
         *,
         gate: dict[str, Any],
         collected_from_chat: Optional[dict[str, Any]],
+        clarification_question: Optional[str],
         detected_intent: str,
         target_agent: Optional[str],
         user_id: str,
@@ -1165,6 +1169,10 @@ class ChatService:
         no_fields_extracted = not applied_fields
         is_domain_query = detected_intent not in {"profile_completion", "out_of_scope"}
         was_already_reminded = await self._has_recent_profile_gate_reminder(chat_id)
+        missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+
+        if clarification_question:
+            return clarification_question, gate
 
         if no_fields_extracted and is_domain_query and was_already_reminded:
             logger.info(
@@ -1186,12 +1194,21 @@ class ChatService:
             )
             return response, updated_gate
 
+        if is_domain_query and self._is_explicit_intent_request(content, detected_intent):
+            response = self._build_intent_gated_response(
+                detected_intent=detected_intent,
+                missing_fields=missing_fields,
+                clarification_question=None,
+            )
+            return response, gate
+
         response = self._build_profile_gate_response(
-            _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
+            missing_fields,
             applied_fields=applied_fields,
             pending_clarification_fields=_as_string_list(
                 (collected_from_chat or {}).get("pending_clarification_fields")
             ),
+            clarification_question=clarification_question,
         )
         return response, gate
 

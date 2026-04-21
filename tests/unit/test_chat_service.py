@@ -2,7 +2,7 @@
 
 # Pytest injects fixture names as test parameters (redefined-outer-name).
 # Tests call private helpers on the service under test (protected-access).
-# pylint: disable=redefined-outer-name,protected-access
+# pylint: disable=redefined-outer-name,protected-access,too-many-lines
 
 import base64
 from datetime import datetime, timezone
@@ -573,7 +573,6 @@ async def test_send_message_profile_gate_collects_and_rechecks(
     sample_chat,
     sample_message,
     mock_profile_gate_service,
-    mock_program_discovery_client,
 ):
     mock_profile_gate_service.evaluate_gate.side_effect = [
         {

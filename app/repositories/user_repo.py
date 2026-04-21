@@ -1,5 +1,6 @@
 """Data-access layer for the users table (phone-based auth)."""
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -11,6 +12,28 @@ from app.core.logging import get_logger
 from app.utils.profile_completion import is_profile_complete
 
 logger = get_logger(__name__)
+
+# MySQL error codes
+_MYSQL_ER_DUP_ENTRY = 1062
+
+# Regex to extract key name from MySQL duplicate entry error message
+# Format: "Duplicate entry 'value' for key 'table.key_name'" or "'key_name'"
+_DUP_KEY_PATTERN = re.compile(r"for key '(?:\w+\.)?(\w+)'")
+
+
+def _extract_duplicate_key_field(exc: pymysql.err.IntegrityError) -> Optional[str]:
+    """Extract the violated unique key field name from a MySQL IntegrityError.
+
+    MySQL duplicate entry errors have format:
+      "Duplicate entry 'value' for key 'table.column'" or "'column'"
+
+    Returns the column name (e.g., 'email', 'username') or None if not parseable.
+    """
+    if len(exc.args) < 2:
+        return None
+    error_msg = str(exc.args[1]) if exc.args[1] else ""
+    match = _DUP_KEY_PATTERN.search(error_msg)
+    return match.group(1) if match else None
 
 
 class DuplicateFieldError(Exception):
@@ -241,13 +264,18 @@ class UserRepository:
                     await cur.execute(query, tuple(params))
                     await conn.commit()
         except pymysql.err.IntegrityError as exc:
-            # MySQL error 1062 = duplicate entry
-            error_msg = str(exc)
-            if "Duplicate entry" in error_msg:
-                if "email" in error_msg.lower():
+            errno = exc.args[0] if exc.args else None
+            if errno == _MYSQL_ER_DUP_ENTRY:
+                violated_field = _extract_duplicate_key_field(exc)
+                if violated_field == "email":
                     raise DuplicateFieldError("email", email or "") from exc
-                if "username" in error_msg.lower():
+                if violated_field == "username":
                     raise DuplicateFieldError("username", "") from exc
+                logger.warning(
+                    "unhandled_duplicate_key",
+                    violated_field=violated_field,
+                    error=str(exc),
+                )
             raise
 
         row = await self.get_by_id(user_id)

@@ -756,7 +756,7 @@ class ChatService:
                 request_path="/chat/ask",
                 call_status="success",
                 request_payload={"question": content},
-                response_payload=result if isinstance(result, dict) else None,
+                response_payload=self._truncate_response_for_logging(result),
                 latency_ms=self._elapsed_ms(started_at),
             )
 
@@ -862,6 +862,43 @@ class ChatService:
     def _elapsed_ms(started_at: float) -> int:
         """Convert perf_counter start time to elapsed milliseconds."""
         return max(0, int((time.perf_counter() - started_at) * 1000))
+
+    @staticmethod
+    def _truncate_response_for_logging(
+        result: Any, max_answer_len: int = 500, max_items: int = 5
+    ) -> Optional[dict[str, Any]]:
+        """Truncate PDA response to bounded subset for agent_call_logs storage.
+
+        Extracts key metadata (answer length, counts) without storing full arrays
+        that could bloat the database or exceed column limits.
+        """
+        if not isinstance(result, dict):
+            return None
+
+        truncated: dict[str, Any] = {}
+
+        answer = result.get("answer") or result.get("response")
+        if isinstance(answer, str):
+            truncated["answer_length"] = len(answer)
+            truncated["answer_preview"] = answer[:max_answer_len] + ("..." if len(answer) > max_answer_len else "")
+
+        for key in ("programs", "institutions", "sources", "results"):
+            if isinstance(result.get(key), list):
+                items = result[key]
+                truncated[f"{key}_count"] = len(items)
+                if items and isinstance(items[0], dict):
+                    truncated[f"{key}_ids"] = [item.get("id") for item in items[:max_items] if item.get("id")]
+
+        for key in ("status", "intent", "query", "session_id", "model"):
+            if key in result:
+                truncated[key] = result[key]
+
+        if isinstance(result.get("data"), dict):
+            data = result["data"]
+            if isinstance(data.get("answer"), str):
+                truncated["data_answer_length"] = len(data["answer"])
+
+        return truncated if truncated else None
 
     async def _create_workflow_run(
         self,

@@ -40,6 +40,378 @@ _FALLBACK_REGISTRY: dict[str, Any] = {
     },
 }
 
+# --- Module-level keyword constants (avoid repeated allocation per call) ---
+
+_CLARIFICATION_DEGREE_ANSWERS: frozenset[str] = frozenset(
+    {
+        "phd",
+        "doctorate",
+        "doctoral",
+        "master",
+        "masters",
+        "msc",
+        "m.sc",
+        "ms",
+        "mba",
+        "bachelor",
+        "bachelors",
+        "bsc",
+        "b.sc",
+        "bs",
+        "undergraduate",
+    }
+)
+
+_PROGRAM_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "program",
+        "programs",
+        "university",
+        "universities",
+        "school",
+        "schools",
+        "course",
+        "courses",
+        "major",
+        "majors",
+        "institution",
+        "institutions",
+        "college",
+        "colleges",
+        "degree",
+        "degrees",
+        "admission",
+        "admissions",
+        "graduate",
+        "postgraduate",
+        "undergraduate",
+        "study",
+        "studying",
+    }
+)
+
+_RANKING_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "ranking",
+        "rankings",
+        "ranked",
+        "top",
+        "best",
+        "leading",
+        "prestigious",
+        "world class",
+        "highly ranked",
+        "qs",
+        "qs world",
+        "times higher education",
+        "the ranking",
+        "arwu",
+        "shanghai ranking",
+    }
+)
+
+_REQUIREMENT_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "requirement",
+        "requirements",
+        "gpa requirement",
+        "gmat",
+        "gre",
+        "toefl",
+        "ielts",
+        "sat",
+        "act",
+        "prerequisite",
+        "prerequisites",
+        "qualify",
+        "qualified",
+        "eligible",
+        "eligibility",
+        "need to apply",
+        "how to apply",
+    }
+)
+
+_COST_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "tuition",
+        "fee",
+        "fees",
+        "cost",
+        "costs",
+        "affordable",
+        "expensive",
+        "cheap",
+        "budget",
+        "price",
+    }
+)
+
+_DEADLINE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "deadline",
+        "deadlines",
+        "due date",
+        "application date",
+        "apply by",
+        "last date",
+        "intake",
+        "semester",
+    }
+)
+
+_COMPARISON_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "compare",
+        "comparison",
+        "vs",
+        "versus",
+        "better",
+        "difference between",
+        "which is better",
+        "should i choose",
+    }
+)
+
+_FIELD_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "computer science",
+        "data science",
+        "artificial intelligence",
+        "machine learning",
+        "engineering",
+        "mechanical",
+        "electrical",
+        "civil",
+        "chemical",
+        "biomedical",
+        "business",
+        "mba",
+        "finance",
+        "accounting",
+        "marketing",
+        "economics",
+        "management",
+        "medicine",
+        "medical",
+        "law",
+        "legal",
+        "psychology",
+        "biology",
+        "chemistry",
+        "physics",
+        "mathematics",
+        "statistics",
+        "environmental",
+        "architecture",
+        "design",
+        "arts",
+        "humanities",
+        "social science",
+        "political science",
+        "international relations",
+        "public policy",
+        "public health",
+        "nursing",
+        "pharmacy",
+        "education",
+        "journalism",
+        "communications",
+        "media",
+        "information technology",
+        "cybersecurity",
+        "blockchain",
+        "fintech",
+        "supply chain",
+        "operations",
+        "analytics",
+        "stem",
+    }
+)
+
+# Short acronyms (<=4 chars) need word-boundary matching to avoid false positives
+# e.g., "mit" should not match "submit", "ucl" should not match "nucleus"
+_SHORT_UNIVERSITY_ACRONYMS: frozenset[str] = frozenset(
+    {
+        "nus",
+        "ntu",
+        "smu",
+        "sutd",
+        "sit",
+        "mit",
+        "ucl",
+        "lse",
+        "lbs",
+        "eth",
+        "epfl",
+        "cmu",
+        "nyu",
+        "usc",
+        "ucla",
+        "hec",
+        "iit",
+        "iim",
+        "iisc",
+        "bits",
+        "snu",
+        "hku",
+        "cuhk",
+        "hkust",
+        "polyu",
+        "unsw",
+        "anu",
+        "ubc",
+        "tum",
+        "rwth",
+        "lmu",
+        "kit",
+        "kth",
+        "dtu",
+        "penn",
+        "upenn",
+        "umich",
+        "uiuc",
+        "kaist",
+        "postech",
+        "aalto",
+    }
+)
+
+# Longer university names safe for substring matching
+_UNIVERSITY_NAMES: frozenset[str] = frozenset(
+    {
+        "stanford",
+        "harvard",
+        "oxford",
+        "cambridge",
+        "berkeley",
+        "yale",
+        "princeton",
+        "columbia",
+        "caltech",
+        "cornell",
+        "brown",
+        "dartmouth",
+        "duke",
+        "northwestern",
+        "uchicago",
+        "johns hopkins",
+        "carnegie mellon",
+        "georgia tech",
+        "gatech",
+        "michigan",
+        "ut austin",
+        "texas",
+        "illinois",
+        "purdue",
+        "wisconsin",
+        "washington",
+        "eth zurich",
+        "imperial",
+        "kings college",
+        "edinburgh",
+        "manchester",
+        "warwick",
+        "bristol",
+        "birmingham",
+        "leeds",
+        "nottingham",
+        "southampton",
+        "glasgow",
+        "sheffield",
+        "durham",
+        "exeter",
+        "insead",
+        "iese",
+        "london business school",
+        "wharton",
+        "kellogg",
+        "booth",
+        "sloan",
+        "haas",
+        "tuck",
+        "ross",
+        "fuqua",
+        "stern",
+        "tsinghua",
+        "peking",
+        "fudan",
+        "shanghai jiao tong",
+        "zhejiang",
+        "nanjing",
+        "wuhan",
+        "tokyo",
+        "kyoto",
+        "osaka",
+        "tohoku",
+        "nagoya",
+        "waseda",
+        "keio",
+        "seoul national",
+        "yonsei",
+        "korea university",
+        "hanyang",
+        "melbourne",
+        "sydney",
+        "queensland",
+        "monash",
+        "adelaide",
+        "auckland",
+        "toronto",
+        "mcgill",
+        "waterloo",
+        "alberta",
+        "montreal",
+        "delft",
+        "tu munich",
+        "heidelberg",
+        "tu berlin",
+        "humboldt",
+        "sorbonne",
+        "ecole polytechnique",
+        "sciences po",
+        "bocconi",
+        "politecnico",
+        "tu vienna",
+        "chalmers",
+        "leiden",
+        "amsterdam",
+        "utrecht",
+        "wageningen",
+        "lund",
+        "uppsala",
+        "copenhagen",
+        "technion",
+        "hebrew university",
+        "tel aviv",
+    }
+)
+
+_UNIVERSITY_PATTERNS: tuple[str, ...] = (
+    r"\bat\s+\w+(?:\s+\w+)?\s*(?:university|universities|college|colleges|institute|school|uni)\b",
+    r"\b\w+(?:\s+\w+)?\s*(?:university|universities|college|colleges|institute|institutes|school|uni)\b",
+    r"\buniversity\s+of\s+\w+(?:\s+\w+)?\b",
+    r"\b\w+'s\s+(?:programs?|courses?|degrees?|graduate|mba|masters?|phd)\b",
+    r"\bprograms?\s+at\s+\w+\b",
+    r"\bstudying\s+at\s+\w+\b",
+    r"\badmission\s+to\s+\w+\b",
+    r"\babout\s+\w+(?:\s+\w+)?\s+(?:uni|university|college|institute)\b",
+    r"\b\w+\s+uni\s+from\s+qs\b",
+    r"\bdetails?\s+(?:about|of)\s+\w+(?:\s+\w+)?\s+(?:from\s+)?(?:qs|ranking|rankings)\b",
+    r"\b\w+(?:\s+\w+)?\s+from\s+qs(?:\s+ranking|\s+rankings)?\b",
+)
+
+_APPLICATION_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "apply",
+        "application",
+        "deadline",
+        "how to apply",
+        "apply to",
+        "applying",
+    }
+)
+
 
 class IntentRegistryService:
     """Loads and serves intent policy used by chat orchestration."""
@@ -70,24 +442,7 @@ class IntentRegistryService:
         if not lowered:
             return "profile_completion"
 
-        clarification_degree_answers = {
-            "phd",
-            "doctorate",
-            "doctoral",
-            "master",
-            "masters",
-            "msc",
-            "m.sc",
-            "ms",
-            "mba",
-            "bachelor",
-            "bachelors",
-            "bsc",
-            "b.sc",
-            "bs",
-            "undergraduate",
-        }
-        if lowered in clarification_degree_answers:
+        if lowered in _CLARIFICATION_DEGREE_ANSWERS:
             return "profile_completion"
 
         if re.fullmatch(r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?", lowered) or re.fullmatch(r"\d+(?:\.\d+)?", lowered):
@@ -95,7 +450,7 @@ class IntentRegistryService:
 
         if any(
             token in lowered
-            for token in ["cv", "resume", "upload my", "transcript", "my document", "processing", "feedback"]
+            for token in ("cv", "resume", "upload my", "transcript", "my document", "processing", "feedback")
         ):
             return "profile_completion"
 
@@ -104,20 +459,20 @@ class IntentRegistryService:
                 return "apply_to_named_school"
             return "program_discovery"
 
-        if any(token in lowered for token in ["profile", "my gpa", "my degree", "my background", "update my"]):
+        if any(token in lowered for token in ("profile", "my gpa", "my degree", "my background", "update my")):
             return "profile_completion"
 
-        if any(token in lowered for token in ["scholarship", "funding", "grant", "financial aid"]):
+        if any(token in lowered for token in ("scholarship", "funding", "grant", "financial aid")):
             return "scholarship_search"
 
-        if any(token in lowered for token in ["eligible", "eligibility", "qualify", "qualified"]):
+        if any(token in lowered for token in ("eligible", "eligibility", "qualify", "qualified")):
             if self._is_program_discovery_query(lowered):
                 return "program_discovery"
             return "eligibility_check"
 
         if any(
             token in lowered
-            for token in ["application plan", "application timeline", "statement of purpose", "cover letter"]
+            for token in ("application plan", "application timeline", "statement of purpose", "cover letter")
         ):
             return "application_planning"
 
@@ -125,172 +480,19 @@ class IntentRegistryService:
 
     def _is_program_discovery_query(self, lowered: str) -> bool:
         """Check if query is related to programs, universities, or institutions."""
-        program_keywords = {
-            "program",
-            "programs",
-            "university",
-            "universities",
-            "school",
-            "schools",
-            "course",
-            "courses",
-            "major",
-            "majors",
-            "institution",
-            "institutions",
-            "college",
-            "colleges",
-            "degree",
-            "degrees",
-            "admission",
-            "admissions",
-            "graduate",
-            "postgraduate",
-            "undergraduate",
-            "study",
-            "studying",
-        }
-
-        ranking_keywords = {
-            "ranking",
-            "rankings",
-            "ranked",
-            "top",
-            "best",
-            "leading",
-            "prestigious",
-            "world class",
-            "highly ranked",
-            "qs",
-            "qs world",
-            "times higher education",
-            "the ranking",
-            "arwu",
-            "shanghai ranking",
-        }
-
-        requirement_keywords = {
-            "requirement",
-            "requirements",
-            "gpa requirement",
-            "gmat",
-            "gre",
-            "toefl",
-            "ielts",
-            "sat",
-            "act",
-            "prerequisite",
-            "prerequisites",
-            "qualify",
-            "qualified",
-            "eligible",
-            "eligibility",
-            "need to apply",
-            "how to apply",
-        }
-
-        cost_keywords = {
-            "tuition",
-            "fee",
-            "fees",
-            "cost",
-            "costs",
-            "affordable",
-            "expensive",
-            "cheap",
-            "budget",
-            "price",
-        }
-
-        deadline_keywords = {
-            "deadline",
-            "deadlines",
-            "due date",
-            "application date",
-            "apply by",
-            "last date",
-            "intake",
-            "semester",
-        }
-
-        comparison_keywords = {
-            "compare",
-            "comparison",
-            "vs",
-            "versus",
-            "better",
-            "difference between",
-            "which is better",
-            "should i choose",
-        }
-
-        field_keywords = {
-            "computer science",
-            "data science",
-            "artificial intelligence",
-            "machine learning",
-            "engineering",
-            "mechanical",
-            "electrical",
-            "civil",
-            "chemical",
-            "biomedical",
-            "business",
-            "mba",
-            "finance",
-            "accounting",
-            "marketing",
-            "economics",
-            "management",
-            "medicine",
-            "medical",
-            "law",
-            "legal",
-            "psychology",
-            "biology",
-            "chemistry",
-            "physics",
-            "mathematics",
-            "statistics",
-            "environmental",
-            "architecture",
-            "design",
-            "arts",
-            "humanities",
-            "social science",
-            "political science",
-            "international relations",
-            "public policy",
-            "public health",
-            "nursing",
-            "pharmacy",
-            "education",
-            "journalism",
-            "communications",
-            "media",
-            "information technology",
-            "cybersecurity",
-            "blockchain",
-            "fintech",
-            "supply chain",
-            "operations",
-            "analytics",
-            "stem",
-        }
-
-        if any(kw in lowered for kw in program_keywords):
+        if any(kw in lowered for kw in _PROGRAM_KEYWORDS):
             return True
-        if any(kw in lowered for kw in ranking_keywords):
+        if any(kw in lowered for kw in _RANKING_KEYWORDS):
             return True
-        if any(kw in lowered for kw in requirement_keywords):
+        if any(kw in lowered for kw in _REQUIREMENT_KEYWORDS):
             return True
-        if any(kw in lowered for kw in cost_keywords):
+        if any(kw in lowered for kw in _COST_KEYWORDS):
             return True
-        if any(kw in lowered for kw in deadline_keywords):
+        if any(kw in lowered for kw in _DEADLINE_KEYWORDS):
             return True
-        if any(kw in lowered for kw in comparison_keywords):
+        if any(kw in lowered for kw in _COMPARISON_KEYWORDS):
             return True
-        if any(kw in lowered for kw in field_keywords):
+        if any(kw in lowered for kw in _FIELD_KEYWORDS):
             return True
 
         if self._has_university_mention(lowered):
@@ -300,172 +502,14 @@ class IntentRegistryService:
 
     def _has_university_mention(self, lowered: str) -> bool:
         """Check if query mentions a university by name or pattern."""
-        well_known_universities = {
-            "nus",
-            "ntu",
-            "smu",
-            "sutd",
-            "sit",
-            "mit",
-            "stanford",
-            "harvard",
-            "oxford",
-            "cambridge",
-            "berkeley",
-            "yale",
-            "princeton",
-            "columbia",
-            "caltech",
-            "ucla",
-            "usc",
-            "nyu",
-            "upenn",
-            "penn",
-            "cornell",
-            "brown",
-            "dartmouth",
-            "duke",
-            "northwestern",
-            "uchicago",
-            "johns hopkins",
-            "carnegie mellon",
-            "cmu",
-            "georgia tech",
-            "gatech",
-            "umich",
-            "michigan",
-            "ut austin",
-            "texas",
-            "uiuc",
-            "illinois",
-            "purdue",
-            "wisconsin",
-            "washington",
-            "eth zurich",
-            "eth",
-            "epfl",
-            "imperial",
-            "ucl",
-            "lse",
-            "kings college",
-            "edinburgh",
-            "manchester",
-            "warwick",
-            "bristol",
-            "birmingham",
-            "leeds",
-            "nottingham",
-            "southampton",
-            "glasgow",
-            "sheffield",
-            "durham",
-            "exeter",
-            "insead",
-            "hec",
-            "iese",
-            "london business school",
-            "lbs",
-            "wharton",
-            "kellogg",
-            "booth",
-            "sloan",
-            "haas",
-            "tuck",
-            "ross",
-            "fuqua",
-            "stern",
-            "iit",
-            "iim",
-            "iisc",
-            "bits",
-            "tsinghua",
-            "peking",
-            "fudan",
-            "shanghai jiao tong",
-            "zhejiang",
-            "nanjing",
-            "wuhan",
-            "tokyo",
-            "kyoto",
-            "osaka",
-            "tohoku",
-            "nagoya",
-            "waseda",
-            "keio",
-            "seoul national",
-            "snu",
-            "kaist",
-            "postech",
-            "yonsei",
-            "korea university",
-            "hanyang",
-            "hku",
-            "cuhk",
-            "hkust",
-            "polyu",
-            "melbourne",
-            "sydney",
-            "unsw",
-            "anu",
-            "queensland",
-            "monash",
-            "adelaide",
-            "auckland",
-            "toronto",
-            "ubc",
-            "mcgill",
-            "waterloo",
-            "alberta",
-            "montreal",
-            "delft",
-            "tu munich",
-            "tum",
-            "rwth",
-            "heidelberg",
-            "lmu",
-            "kit",
-            "tu berlin",
-            "humboldt",
-            "sorbonne",
-            "ecole polytechnique",
-            "sciences po",
-            "bocconi",
-            "politecnico",
-            "tu vienna",
-            "kth",
-            "chalmers",
-            "dtu",
-            "aalto",
-            "leiden",
-            "amsterdam",
-            "utrecht",
-            "wageningen",
-            "lund",
-            "upssala",
-            "copenhagen",
-            "technion",
-            "hebrew university",
-            "tel aviv",
-        }
-
-        if any(uni in lowered for uni in well_known_universities):
+        if any(name in lowered for name in _UNIVERSITY_NAMES):
             return True
 
-        university_patterns = [
-            r"\bat\s+\w+(?:\s+\w+)?\s*(?:university|universities|college|colleges|institute|school|uni)\b",
-            r"\b\w+(?:\s+\w+)?\s*(?:university|universities|college|colleges|institute|institutes|school|uni)\b",
-            r"\buniversity\s+of\s+\w+(?:\s+\w+)?\b",
-            r"\b\w+'s\s+(?:programs?|courses?|degrees?|graduate|mba|masters?|phd)\b",
-            r"\bprograms?\s+at\s+\w+\b",
-            r"\bstudying\s+at\s+\w+\b",
-            r"\badmission\s+to\s+\w+\b",
-            r"\babout\s+\w+(?:\s+\w+)?\s+(?:uni|university|college|institute)\b",
-            r"\b\w+\s+uni\s+from\s+qs\b",
-            r"\bdetails?\s+(?:about|of)\s+\w+(?:\s+\w+)?\s+(?:from\s+)?(?:qs|ranking|rankings)\b",
-            r"\b\w+(?:\s+\w+)?\s+from\s+qs(?:\s+ranking|\s+rankings)?\b",
-        ]
+        for acronym in _SHORT_UNIVERSITY_ACRONYMS:
+            if re.search(rf"\b{re.escape(acronym)}\b", lowered):
+                return True
 
-        for pattern in university_patterns:
+        for pattern in _UNIVERSITY_PATTERNS:
             if re.search(pattern, lowered):
                 return True
 
@@ -477,9 +521,7 @@ class IntentRegistryService:
     @staticmethod
     def _has_application_keywords(lowered: str) -> bool:
         """Check if query has application-related keywords."""
-        return any(
-            token in lowered for token in ["apply", "application", "deadline", "how to apply", "apply to", "applying"]
-        )
+        return any(token in lowered for token in _APPLICATION_KEYWORDS)
 
     def get_policy(self, intent: str) -> dict[str, Any]:
         """Return policy object for an intent, falling back to out-of-scope."""

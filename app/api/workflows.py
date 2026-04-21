@@ -7,11 +7,14 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from app.clients.student_profile_client import StudentProfileClient
 from app.core.database import get_pool
+from app.core.logging import get_logger
 from app.middleware.auth_middleware import get_current_user_id
 from app.repositories.chat_repo import ChatRepository
 from app.repositories.message_repo import MessageRepository
 from app.services.chat_service import ChatService
 from app.services.profile_gate_service import ProfileGateService
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/workflows", tags=["Workflows"])
 
@@ -140,22 +143,38 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
         return result
 
     except Exception as exc:
+        logger.error(
+            "document_upload_failed",
+            user_id=user_id,
+            document_type=document_type,
+            file_name=filename,
+            error=str(exc),
+            exc_info=True,
+        )
         if chat_id:
             error_notice = (
                 f"I encountered an issue while processing your {document_type}. "
                 "Please try uploading again, or try a different file format."
             )
-            await chat_service.post_assistant_notice(
-                user_id=user_id,
-                chat_id=chat_id,
-                content=error_notice,
-                metadata={
-                    "notice_type": "document_upload_error",
-                    "document_type": document_type,
-                    "file_name": filename,
-                    "error": str(exc),
-                },
-            )
+            try:
+                await chat_service.post_assistant_notice(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    content=error_notice,
+                    metadata={
+                        "notice_type": "document_upload_error",
+                        "document_type": document_type,
+                        "file_name": filename,
+                        "error_code": "document_processing_failed",
+                    },
+                )
+            except Exception as notice_exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "failed_to_post_document_error_notice",
+                    chat_id=chat_id,
+                    original_error=type(exc).__name__,
+                    notice_error=str(notice_exc),
+                )
         raise
 
 

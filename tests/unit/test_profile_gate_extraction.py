@@ -109,6 +109,17 @@ def test_extract_intended_field_of_study_bare_answer():
     assert extracted["intended_field_of_study"] == "Computer Science"
 
 
+def test_extract_intended_field_of_study_ignores_degree_phrase_answer():
+    content = "master degree"
+
+    extracted = ProfileGateService.extract_profile_fields_from_chat(
+        content,
+        ["intended_field_of_study"],
+    )
+
+    assert "intended_field_of_study" not in extracted
+
+
 def test_extract_funding_source_multiple_options():
     content = "I am looking for scholarship support, otherwise student loan is possible."
 

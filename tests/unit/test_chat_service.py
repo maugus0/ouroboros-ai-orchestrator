@@ -17,7 +17,6 @@ from app.services.chat_service import ChatService
 
 @pytest.fixture
 def mock_chat_repo():
-    """Create a mock ChatRepository."""
     repo = MagicMock()
     repo.create = AsyncMock()
     repo.get_by_id = AsyncMock()
@@ -35,7 +34,6 @@ def mock_chat_repo():
 
 @pytest.fixture
 def mock_message_repo():
-    """Create a mock MessageRepository."""
     repo = MagicMock()
     repo.create = AsyncMock()
     repo.get_by_id = AsyncMock()
@@ -46,7 +44,6 @@ def mock_message_repo():
 
 @pytest.fixture
 def mock_project_repo():
-    """Create a mock ProjectRepository."""
     repo = MagicMock()
     repo.create = AsyncMock()
     repo.get_by_id = AsyncMock()
@@ -59,10 +56,10 @@ def mock_project_repo():
 
 @pytest.fixture
 def mock_profile_gate_service():
-    """Create a mock profile gate service."""
     service = MagicMock()
     service.evaluate_gate = AsyncMock()
     service.collect_profile_updates_from_chat = AsyncMock()
+    service.persist_profile_updates_from_chat = AsyncMock()
     service.get_profile_clarifications = AsyncMock()
     service.submit_profile_clarification_answers = AsyncMock()
     return service
@@ -70,7 +67,6 @@ def mock_profile_gate_service():
 
 @pytest.fixture
 def mock_intent_registry_service():
-    """Create a mock intent registry service."""
     service = MagicMock()
     service.detect_intent = MagicMock(return_value="program_discovery")
     service.get_policy = MagicMock(return_value={"agent": "program-discovery"})
@@ -79,7 +75,6 @@ def mock_intent_registry_service():
 
 @pytest.fixture
 def mock_agent_availability_service():
-    """Create a mock agent availability service."""
     service = MagicMock()
     service.is_agent_available = AsyncMock(return_value=True)
     return service
@@ -87,7 +82,6 @@ def mock_agent_availability_service():
 
 @pytest.fixture
 def mock_program_discovery_client():
-    """Create a mock program discovery client."""
     client = MagicMock()
     client.probe_health = AsyncMock(return_value={"status": "ok"})
     client.ask_question = AsyncMock(
@@ -109,7 +103,6 @@ def chat_service(
     mock_agent_availability_service,
     mock_program_discovery_client,
 ):
-    """Create ChatService with mocked repositories."""
     ChatService._RESPONSE_CACHE.clear()
     return ChatService(
         chat_repo=mock_chat_repo,
@@ -124,7 +117,6 @@ def chat_service(
 
 @pytest.fixture
 def sample_chat():
-    """Sample chat data."""
     return {
         "id": "chat-123",
         "user_id": "user-456",
@@ -141,7 +133,6 @@ def sample_chat():
 
 @pytest.fixture
 def sample_message():
-    """Sample message data."""
     return {
         "id": "msg-789",
         "chat_id": "chat-123",
@@ -157,7 +148,6 @@ def sample_message():
 
 @pytest.mark.asyncio
 async def test_create_chat_empty(chat_service, mock_chat_repo, sample_chat, mock_profile_gate_service):
-    """Test creating an empty chat without initial message."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -179,7 +169,6 @@ async def test_create_chat_empty(chat_service, mock_chat_repo, sample_chat, mock
 async def test_create_chat_with_message(
     chat_service, mock_chat_repo, mock_message_repo, sample_chat, sample_message, mock_profile_gate_service
 ):
-    """Test creating a chat with an initial message."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -254,7 +243,6 @@ async def test_send_message_reuses_cached_response_for_repeated_turns(
     mock_profile_gate_service,
     mock_program_discovery_client,
 ):
-    """Repeated identical turns in the same chat should reuse the cached assistant response."""
     ChatService._RESPONSE_CACHE.clear()
     mock_program_discovery_client.ask_question.return_value = {
         "answer": "Here are graduate programs matching your criteria.",
@@ -299,7 +287,6 @@ async def test_send_message_reuses_cached_response_for_repeated_turns(
 
 @pytest.mark.asyncio
 async def test_response_cache_evicts_oldest_entries():
-    """The response cache should stay bounded and evict the least-recently-used entry."""
     original_max_entries = ChatService._RESPONSE_CACHE_MAX_ENTRIES
     original_ttl_seconds = ChatService._RESPONSE_CACHE_TTL_SECONDS
     ChatService._RESPONSE_CACHE.clear()
@@ -355,7 +342,6 @@ async def test_send_message_profile_gate_denied(
     sample_message,
     mock_profile_gate_service,
 ):
-    """Test that incomplete profiles receive deterministic guidance."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": False,
@@ -388,7 +374,6 @@ async def test_post_assistant_notice_persists_assistant_message(
     mock_message_repo,
     sample_chat,
 ):
-    """Assistant notice should create assistant-only message and update chat counters."""
     assistant_notice = {
         "id": "msg-asst-001",
         "chat_id": "chat-123",
@@ -422,6 +407,41 @@ async def test_post_assistant_notice_persists_assistant_message(
 
 
 @pytest.mark.asyncio
+async def test_post_assistant_notice_infers_active_profile_slot_metadata(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+):
+    assistant_notice = {
+        "id": "msg-asst-002",
+        "chat_id": "chat-123",
+        "role": "assistant",
+        "content": "What is your target degree level?",
+        "metadata": {},
+        "created_at": datetime.now(timezone.utc),
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 1}
+    mock_message_repo.create.return_value = assistant_notice
+
+    await chat_service.post_assistant_notice(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="What is your target degree level?",
+        metadata={"source": "profile_upload_followup"},
+    )
+
+    _, kwargs = mock_message_repo.create.call_args
+    assert kwargs["metadata"]["active_profile_slot"] == {
+        "field": "target_degree_level",
+        "label": "target degree level",
+        "expected_type": "degree_level",
+        "source": "message_inference",
+    }
+
+
+@pytest.mark.asyncio
 async def test_send_message_profile_completion_returns_readiness_summary(
     chat_service,
     mock_chat_repo,
@@ -430,7 +450,6 @@ async def test_send_message_profile_completion_returns_readiness_summary(
     sample_message,
     mock_profile_gate_service,
 ):
-    """Profile completion should respond with a profile-specific readiness summary."""
     chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
     mock_profile_gate_service.evaluate_gate.return_value = {
@@ -471,7 +490,6 @@ async def test_send_message_cv_upload_returns_upload_guidance(
     sample_message,
     mock_profile_gate_service,
 ):
-    """CV upload requests should route to a CV upload guidance response."""
     chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
     mock_profile_gate_service.evaluate_gate.return_value = {
@@ -511,7 +529,6 @@ async def test_send_message_profile_gate_uses_natural_labels_for_remaining_field
     sample_message,
     mock_profile_gate_service,
 ):
-    """Test that saved and missing profile fields are rendered with natural labels."""
     mock_profile_gate_service.evaluate_gate.side_effect = [
         {
             "user_id": "user-456",
@@ -558,8 +575,6 @@ async def test_send_message_profile_gate_collects_and_rechecks(
     mock_profile_gate_service,
     mock_program_discovery_client,
 ):
-    """Test that profile fields from chat are collected before the second gate decision."""
-    _ = mock_program_discovery_client  # Used indirectly via chat_service fixture
     mock_profile_gate_service.evaluate_gate.side_effect = [
         {
             "user_id": "user-456",
@@ -639,6 +654,61 @@ async def test_send_message_program_discovery_mentions_singapore_when_present(
 
 
 @pytest.mark.asyncio
+async def test_send_message_program_discovery_stays_intent_led_when_profile_incomplete(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["current_degree_level", "target_degree_level"],
+            "missing_required_fields": ["current_degree_level", "target_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["current_degree_level"],
+            "missing_required_fields": ["current_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {
+        "applied_fields": ["target_degree_level"],
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = []
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="I want to discover master program",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["metadata"]["intent"] == "program_discovery"
+    assert assistant_kwargs["content"] == (
+        "I can help discover programs, but I need to finish your profile first. "
+        "Please share your current degree level."
+    )
+    assert "saved your target degree level" not in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
 async def test_send_message_program_discovery_unavailable_still_probes(
     chat_service,
     mock_chat_repo,
@@ -648,7 +718,6 @@ async def test_send_message_program_discovery_unavailable_still_probes(
     mock_profile_gate_service,
     mock_program_discovery_client,
 ):
-    """Program-discovery should receive a best-effort probe even when unavailable."""
     chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
     chat_service.agent_availability_service.is_agent_available.return_value = False
@@ -676,7 +745,6 @@ async def test_send_message_profile_gate_acknowledges_applied_fields(
     sample_message,
     mock_profile_gate_service,
 ):
-    """When chat extraction applies fields but gate remains closed, assistant should acknowledge and ask next."""
     mock_profile_gate_service.evaluate_gate.side_effect = [
         {
             "user_id": "user-456",
@@ -720,7 +788,6 @@ async def test_send_message_out_of_scope_returns_boundary_guidance(
     sample_message,
     mock_profile_gate_service,
 ):
-    """Out-of-scope messages should return boundary guidance without profile gating."""
     chat_service.intent_registry_service.detect_intent.return_value = "out_of_scope"
     chat_service.intent_registry_service.get_policy.return_value = {
         "fallback": {
@@ -753,7 +820,6 @@ async def test_send_message_mapped_intent_with_unavailable_agent_returns_unavail
     sample_message,
     mock_profile_gate_service,
 ):
-    """Mapped intents with unavailable agents should return unavailable-service guidance."""
     chat_service.intent_registry_service.detect_intent.return_value = "scholarship_search"
     chat_service.intent_registry_service.get_policy.return_value = {
         "agent": "scholarship-discovery",
@@ -789,7 +855,6 @@ async def test_send_message_out_of_scope_is_overridden_during_profile_clarificat
     sample_message,
     mock_profile_gate_service,
 ):
-    """Short clarification replies should stay in profile-completion flow."""
     chat_service.intent_registry_service.detect_intent.return_value = "out_of_scope"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
 
@@ -844,7 +909,6 @@ async def test_send_message_uses_clarification_question_from_student_profile(
     sample_message,
     mock_profile_gate_service,
 ):
-    """Profile gate failures should render the fetched clarification question in chat."""
     chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
 
@@ -872,12 +936,8 @@ async def test_send_message_uses_clarification_question_from_student_profile(
     mock_profile_gate_service.get_profile_clarifications.return_value = {
         "profile_id": "profile-1",
         "status": "needs_clarification",
-        "clarification_queue": [
-            {"field": "current_degree_level", "question": "What is your current degree level?"}
-        ],
-        "react_decision_trace": {
-            "current_degree_level": {"decision": "clarify", "reason": "missing_or_unknown"}
-        },
+        "clarification_queue": [{"field": "current_degree_level", "question": "What is your current degree level?"}],
+        "react_decision_trace": {"current_degree_level": {"decision": "clarify", "reason": "missing_or_unknown"}},
     }
 
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
@@ -905,7 +965,6 @@ async def test_send_message_binary_reply_routes_to_react_clarification_submissio
     sample_message,
     mock_profile_gate_service,
 ):
-    """Binary replies to a ReAct yes/no question should submit clarification instead of field extraction."""
     chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
 
@@ -984,8 +1043,173 @@ async def test_send_message_binary_reply_routes_to_react_clarification_submissio
 
 
 @pytest.mark.asyncio
+async def test_send_message_non_binary_degree_reply_routes_to_react_clarification_submission(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["current_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["target_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "status": "needs_clarification",
+        "clarification_queue": [
+            {
+                "field": "current_degree_level",
+                "question": "What is your current degree level?",
+            }
+        ],
+    }
+    mock_profile_gate_service.submit_profile_clarification_answers.return_value = {
+        "profile_id": "profile-1",
+        "applied_fields": ["current_degree_level"],
+        "clarification_queue": [
+            {
+                "field": "target_degree_level",
+                "question": "What is your target degree level?",
+            }
+        ],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = [
+        {
+            "id": "assistant-prev-1",
+            "role": "assistant",
+            "content": "What is your current degree level?",
+            "metadata": {
+                "profile_gate": {
+                    "allowed": False,
+                    "reason": "profile_incomplete_for_intent",
+                },
+            },
+        }
+    ]
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="master degree",
+    )
+
+    mock_profile_gate_service.collect_profile_updates_from_chat.assert_not_awaited()
+    mock_profile_gate_service.submit_profile_clarification_answers.assert_awaited_once()
+    submit_kwargs = mock_profile_gate_service.submit_profile_clarification_answers.call_args.kwargs
+    assert submit_kwargs["answers"] == [{"field": "current_degree_level", "value": "master degree"}]
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["content"] == "What is your target degree level?"
+
+
+@pytest.mark.asyncio
+async def test_send_message_slot_bound_reply_persists_active_prompt_field_first(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["current_degree_level", "target_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["target_degree_level"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.persist_profile_updates_from_chat.return_value = {
+        "applied_fields": ["current_degree_level"],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = [
+        {
+            "id": "assistant-prev-1",
+            "role": "assistant",
+            "content": "Let's start with your current degree level. Once you send that, I'll ask for the next detail.",
+            "metadata": {
+                "profile_gate": {
+                    "allowed": False,
+                    "reason": "profile_incomplete_for_intent",
+                },
+                "active_profile_slot": {
+                    "field": "current_degree_level",
+                    "label": "current degree level",
+                    "expected_type": "degree_level",
+                    "source": "profile_gate_missing_field",
+                },
+            },
+        }
+    ]
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="master degree",
+    )
+
+    mock_profile_gate_service.persist_profile_updates_from_chat.assert_awaited_once()
+    persist_kwargs = mock_profile_gate_service.persist_profile_updates_from_chat.call_args.kwargs
+    assert persist_kwargs["fields"] == {"current_degree_level": "master"}
+    mock_profile_gate_service.collect_profile_updates_from_chat.assert_not_awaited()
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert (
+        assistant_kwargs["content"]
+        == "Great, I saved your current degree level. Next, please share your target degree level."
+    )
+    assert assistant_kwargs["metadata"]["active_profile_slot"] == {
+        "field": "target_degree_level",
+        "label": "target degree level",
+        "expected_type": "degree_level",
+        "source": "message_inference",
+    }
+
+
+@pytest.mark.asyncio
 async def test_send_message_chat_not_found(chat_service, mock_chat_repo):
-    """Test sending message to non-existent chat."""
     mock_chat_repo.get_by_id_with_user.return_value = None
 
     with pytest.raises(Exception) as exc_info:
@@ -1000,7 +1224,6 @@ async def test_send_message_chat_not_found(chat_service, mock_chat_repo):
 
 @pytest.mark.asyncio
 async def test_send_message_not_owner(chat_service, mock_chat_repo, sample_chat):
-    """Test sending message to chat owned by another user."""
     mock_chat_repo.get_by_id_with_user.return_value = {
         **sample_chat,
         "user_id": "different-user",
@@ -1018,7 +1241,6 @@ async def test_send_message_not_owner(chat_service, mock_chat_repo, sample_chat)
 
 @pytest.mark.asyncio
 async def test_send_message_deleted_chat(chat_service, mock_chat_repo, sample_chat):
-    """Test sending message to a deleted chat."""
     mock_chat_repo.get_by_id_with_user.return_value = {
         **sample_chat,
         "deleted_at": datetime.now(timezone.utc),
@@ -1039,7 +1261,6 @@ async def test_send_message_deleted_chat(chat_service, mock_chat_repo, sample_ch
 
 @pytest.mark.asyncio
 async def test_list_chats_pagination(chat_service, mock_chat_repo, sample_chat):
-    """Test listing chats with pagination."""
     chats = [sample_chat]
     mock_chat_repo.list_by_user.return_value = (chats, 1)
 
@@ -1052,7 +1273,6 @@ async def test_list_chats_pagination(chat_service, mock_chat_repo, sample_chat):
 
 @pytest.mark.asyncio
 async def test_list_chats_empty(chat_service, mock_chat_repo):
-    """Test that empty list is returned when no chats."""
     mock_chat_repo.list_by_user.return_value = ([], 0)
 
     result = await chat_service.list_chats(user_id="user-456")
@@ -1063,7 +1283,6 @@ async def test_list_chats_empty(chat_service, mock_chat_repo):
 
 @pytest.mark.asyncio
 async def test_list_chats_with_cursor(chat_service, mock_chat_repo, sample_chat):
-    """Test listing chats with cursor pagination."""
     cursor_dt = datetime.now(timezone.utc)
     cursor = base64.b64encode(cursor_dt.isoformat().encode()).decode()
 
@@ -1077,7 +1296,6 @@ async def test_list_chats_with_cursor(chat_service, mock_chat_repo, sample_chat)
 
 @pytest.mark.asyncio
 async def test_list_chats_invalid_cursor(chat_service):
-    """Test that invalid cursor raises 400."""
     with pytest.raises(Exception) as exc_info:
         await chat_service.list_chats(user_id="user-456", cursor="invalid-cursor")
 
@@ -1086,7 +1304,6 @@ async def test_list_chats_invalid_cursor(chat_service):
 
 @pytest.mark.asyncio
 async def test_list_chats_starred_true(chat_service, mock_chat_repo, sample_chat):
-    """Test listing only starred chats (starred=True filter)."""
     starred_chat = {**sample_chat, "is_starred": True}
     mock_chat_repo.list_by_user.return_value = ([starred_chat], 1)
 
@@ -1101,7 +1318,6 @@ async def test_list_chats_starred_true(chat_service, mock_chat_repo, sample_chat
 
 @pytest.mark.asyncio
 async def test_list_chats_starred_false(chat_service, mock_chat_repo, sample_chat):
-    """Test listing only non-starred chats (starred=False filter)."""
     non_starred_chat = {**sample_chat, "is_starred": False}
     mock_chat_repo.list_by_user.return_value = ([non_starred_chat], 1)
 
@@ -1116,7 +1332,6 @@ async def test_list_chats_starred_false(chat_service, mock_chat_repo, sample_cha
 
 @pytest.mark.asyncio
 async def test_list_chats_starred_none(chat_service, mock_chat_repo, sample_chat):
-    """Test listing all chats when starred=None (no filter)."""
     mock_chat_repo.list_by_user.return_value = ([sample_chat], 1)
 
     result = await chat_service.list_chats(user_id="user-456", starred=None)
@@ -1132,7 +1347,6 @@ async def test_list_chats_starred_none(chat_service, mock_chat_repo, sample_chat
 
 @pytest.mark.asyncio
 async def test_get_chat_success(chat_service, mock_chat_repo, sample_chat):
-    """Test getting a chat by ID."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
 
     result = await chat_service.get_chat(user_id="user-456", chat_id="chat-123")
@@ -1142,7 +1356,6 @@ async def test_get_chat_success(chat_service, mock_chat_repo, sample_chat):
 
 @pytest.mark.asyncio
 async def test_get_chat_not_found(chat_service, mock_chat_repo):
-    """Test getting non-existent chat returns 404."""
     mock_chat_repo.get_by_id_with_user.return_value = None
 
     with pytest.raises(Exception) as exc_info:
@@ -1156,7 +1369,6 @@ async def test_get_chat_not_found(chat_service, mock_chat_repo):
 
 @pytest.mark.asyncio
 async def test_update_chat_title_success(chat_service, mock_chat_repo, sample_chat):
-    """Test updating chat title."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_chat_repo.get_by_id.return_value = {**sample_chat, "title": "New Title"}
 
@@ -1172,7 +1384,6 @@ async def test_update_chat_title_success(chat_service, mock_chat_repo, sample_ch
 
 @pytest.mark.asyncio
 async def test_update_chat_starred(chat_service, mock_chat_repo, sample_chat):
-    """Test starring a chat."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_chat_repo.get_by_id.return_value = {**sample_chat, "is_starred": True}
 
@@ -1188,7 +1399,6 @@ async def test_update_chat_starred(chat_service, mock_chat_repo, sample_chat):
 
 @pytest.mark.asyncio
 async def test_update_chat_move_to_project(chat_service, mock_chat_repo, mock_project_repo, sample_chat):
-    """Test moving a chat to a project."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_project_repo.exists_for_user.return_value = True
     mock_chat_repo.get_by_id.return_value = {
@@ -1209,7 +1419,6 @@ async def test_update_chat_move_to_project(chat_service, mock_chat_repo, mock_pr
 
 @pytest.mark.asyncio
 async def test_update_chat_remove_from_project(chat_service, mock_chat_repo, mock_project_repo, sample_chat):
-    """Test removing a chat from a project."""
     sample_chat_with_project = {**sample_chat, "project_id": "proj-123"}
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat_with_project
     mock_chat_repo.get_by_id.return_value = {**sample_chat, "project_id": None}
@@ -1230,7 +1439,6 @@ async def test_update_chat_remove_from_project(chat_service, mock_chat_repo, moc
 
 @pytest.mark.asyncio
 async def test_delete_chat_soft_delete(chat_service, mock_chat_repo, sample_chat):
-    """Test soft deleting a chat."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_chat_repo.soft_delete.return_value = True
 
@@ -1241,7 +1449,6 @@ async def test_delete_chat_soft_delete(chat_service, mock_chat_repo, sample_chat
 
 @pytest.mark.asyncio
 async def test_delete_chat_not_owner(chat_service, mock_chat_repo, sample_chat):
-    """Test deleting chat owned by another user."""
     mock_chat_repo.get_by_id_with_user.return_value = {
         **sample_chat,
         "user_id": "different-user",
@@ -1258,7 +1465,6 @@ async def test_delete_chat_not_owner(chat_service, mock_chat_repo, sample_chat):
 
 @pytest.mark.asyncio
 async def test_get_messages_success(chat_service, mock_chat_repo, mock_message_repo, sample_chat, sample_message):
-    """Test getting message history."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_message_repo.list_by_chat.return_value = [sample_message]
 
@@ -1274,7 +1480,6 @@ async def test_get_messages_success(chat_service, mock_chat_repo, mock_message_r
 
 @pytest.mark.asyncio
 async def test_get_messages_order_desc(chat_service, mock_chat_repo, mock_message_repo, sample_chat, sample_message):
-    """Test getting messages in descending order."""
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_message_repo.list_by_chat.return_value = [sample_message]
 
@@ -1292,14 +1497,7 @@ async def test_get_messages_order_desc(chat_service, mock_chat_repo, mock_messag
 # ── Auto Title Tests ─────────────────────────────────────────────────────────
 
 
-def test_generate_title_from_message_short(chat_service):
-    """Test title generation from short message."""
-    title = chat_service._generate_title_from_message("Hello world")
-    assert title == "Hello world"
-
-
 def test_generate_title_from_message_long(chat_service):
-    """Test title generation truncates long messages."""
     long_message = "This is a very long message that should be truncated because it exceeds the maximum title length"
     title = chat_service._generate_title_from_message(long_message)
 
@@ -1308,7 +1506,6 @@ def test_generate_title_from_message_long(chat_service):
 
 
 def test_generate_title_from_message_word_boundary(chat_service):
-    """Test title truncation respects word boundaries."""
     message = "This is a test message that will definitely exceed the max title length limit"
     title = chat_service._generate_title_from_message(message)
 
@@ -1316,7 +1513,6 @@ def test_generate_title_from_message_word_boundary(chat_service):
 
 
 def test_generate_placeholder_response(chat_service):
-    """Test placeholder response is generated."""
     response = chat_service._generate_placeholder_response("Hello")
 
     assert "Ouroboros" in response

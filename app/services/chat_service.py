@@ -414,6 +414,8 @@ class ChatService:
             )
             intent_policy = self.intent_registry_service.get_policy(detected_intent)
             target_agent = intent_policy.get("agent") if isinstance(intent_policy, dict) else None
+            cached_response: dict[str, Any] | None = None
+            active_profile_slot: dict[str, Any] | None = None
 
             if detected_intent == "out_of_scope":
                 assistant_content = self._build_out_of_scope_response(intent_policy)
@@ -460,77 +462,23 @@ class ChatService:
                 else:
                     collected_from_chat: dict[str, Any] | None = None
                     clarification_question: Optional[str] = None
+                    clarification_field: Optional[str] = None
+                    active_profile_slot = None
 
                     if not gate["allowed"]:
-                        clarification_submission: dict[str, Any] | None = None
-                        routed_to_react_clarification = False
-                        profile_id = gate.get("profile_id")
-
-                        if (
-                            profile_id
-                            and self._is_binary_reply(content)
-                            and self._is_binary_clarification_prompt(latest_assistant_message)
-                        ):
-                            clarifications_before = await self.profile_gate_service.get_profile_clarifications(
+                        gate, collected_from_chat, clarification_field, clarification_question = (
+                            await self._handle_blocked_profile_gate_turn(
                                 user_id=user_id,
-                                profile_id=str(profile_id),
                                 chat_id=chat_id,
-                                workflow_run_id=workflow_run_id,
-                                retry_of_log_id=retry_of_log_id,
-                            )
-                            first_clarification_field = self._extract_clarification_field(clarifications_before)
-                            if first_clarification_field:
-                                clarification_submission = (
-                                    await self.profile_gate_service.submit_profile_clarification_answers(
-                                        user_id=user_id,
-                                        profile_id=str(profile_id),
-                                        answers=[
-                                            {
-                                                "field": first_clarification_field,
-                                                "value": content.strip(),
-                                            }
-                                        ],
-                                        chat_id=chat_id,
-                                        workflow_run_id=workflow_run_id,
-                                        retry_of_log_id=retry_of_log_id,
-                                    )
-                                )
-                                routed_to_react_clarification = clarification_submission is not None
-
-                        if not routed_to_react_clarification:
-                            missing_fields = _as_string_list(
-                                gate.get("missing_required_fields") or gate.get("missing_fields") or []
-                            )
-                            collected_from_chat = await self.profile_gate_service.collect_profile_updates_from_chat(
-                                user_id=user_id,
                                 content=content,
-                                missing_fields=missing_fields,
-                                chat_id=chat_id,
-                                message_id=user_message_id,
+                                user_message_id=user_message_id,
+                                detected_intent=detected_intent,
+                                latest_assistant_message=latest_assistant_message,
+                                gate=gate,
                                 workflow_run_id=workflow_run_id,
                                 retry_of_log_id=retry_of_log_id,
                             )
-                            if not isinstance(collected_from_chat, dict):
-                                collected_from_chat = None
-
-                        gate = await self.profile_gate_service.evaluate_gate(
-                            user_id,
-                            intent=detected_intent,
-                            chat_id=chat_id,
-                            workflow_run_id=workflow_run_id,
-                            retry_of_log_id=retry_of_log_id,
                         )
-                        if gate.get("profile_id"):
-                            clarifications = clarification_submission
-                            if not isinstance(clarifications, dict):
-                                clarifications = await self.profile_gate_service.get_profile_clarifications(
-                                    user_id=user_id,
-                                    profile_id=str(gate["profile_id"]),
-                                    chat_id=chat_id,
-                                    workflow_run_id=workflow_run_id,
-                                    retry_of_log_id=retry_of_log_id,
-                                )
-                            clarification_question = self._extract_clarification_question(clarifications)
 
                     assistant_content, gate = await self._resolve_assistant_content(
                         gate=gate,
@@ -549,6 +497,7 @@ class ChatService:
                             "assistant_content": assistant_content,
                             "gate": gate,
                             "target_agent": target_agent,
+                            "active_profile_slot": active_profile_slot,
                         },
                     )
 
@@ -575,6 +524,11 @@ class ChatService:
                     "workflow_run_id": workflow_run_id,
                     "retry_of_log_id": retry_of_log_id,
                     "intent": detected_intent,
+                    "active_profile_slot": (
+                        (cached_response or {}).get("active_profile_slot")
+                        if cached_response is not None
+                        else active_profile_slot
+                    ),
                 },
             )
             logger.info(
@@ -623,6 +577,123 @@ class ChatService:
             )
             raise
 
+    async def _handle_blocked_profile_gate_turn(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        user_message_id: str,
+        detected_intent: str,
+        latest_assistant_message: Optional[dict[str, Any]],
+        gate: dict[str, Any],
+        workflow_run_id: str,
+        retry_of_log_id: Optional[str],
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]], Optional[str], Optional[str]]:
+        clarification_submission: dict[str, Any] | None = None
+        clarification_field: Optional[str] = None
+        clarification_question: Optional[str] = None
+        collected_from_chat: dict[str, Any] | None = None
+        routed_to_react_clarification = False
+        profile_id = gate.get("profile_id")
+        latest_active_slot = self._extract_active_profile_slot(latest_assistant_message)
+
+        if profile_id and latest_active_slot is not None and latest_active_slot.get("source") == "clarification_queue":
+            first_clarification_field = str(latest_active_slot.get("field") or "").strip()
+            if first_clarification_field:
+                clarification_submission = await self.profile_gate_service.submit_profile_clarification_answers(
+                    user_id=user_id,
+                    profile_id=str(profile_id),
+                    answers=[
+                        {
+                            "field": first_clarification_field,
+                            "value": content.strip(),
+                        }
+                    ],
+                    chat_id=chat_id,
+                    workflow_run_id=workflow_run_id,
+                    retry_of_log_id=retry_of_log_id,
+                )
+                routed_to_react_clarification = clarification_submission is not None
+
+        if (
+            not routed_to_react_clarification
+            and profile_id
+            and self._is_profile_gate_followup_prompt(latest_assistant_message)
+        ):
+            clarifications_before = await self.profile_gate_service.get_profile_clarifications(
+                user_id=user_id,
+                profile_id=str(profile_id),
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                retry_of_log_id=retry_of_log_id,
+            )
+            first_clarification_field = self._extract_clarification_field(clarifications_before)
+            if first_clarification_field:
+                clarification_submission = await self.profile_gate_service.submit_profile_clarification_answers(
+                    user_id=user_id,
+                    profile_id=str(profile_id),
+                    answers=[
+                        {
+                            "field": first_clarification_field,
+                            "value": content.strip(),
+                        }
+                    ],
+                    chat_id=chat_id,
+                    workflow_run_id=workflow_run_id,
+                    retry_of_log_id=retry_of_log_id,
+                )
+                routed_to_react_clarification = clarification_submission is not None
+
+        if not routed_to_react_clarification and latest_active_slot is not None:
+            slot_updates = self._extract_slot_bound_profile_updates(content, latest_active_slot)
+            if slot_updates:
+                collected_from_chat = await self.profile_gate_service.persist_profile_updates_from_chat(
+                    user_id=user_id,
+                    fields=slot_updates,
+                    chat_id=chat_id,
+                    message_id=user_message_id,
+                    workflow_run_id=workflow_run_id,
+                    retry_of_log_id=retry_of_log_id,
+                )
+                routed_to_react_clarification = collected_from_chat is not None
+
+        if not routed_to_react_clarification:
+            missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+            collected_from_chat = await self.profile_gate_service.collect_profile_updates_from_chat(
+                user_id=user_id,
+                content=content,
+                missing_fields=missing_fields,
+                chat_id=chat_id,
+                message_id=user_message_id,
+                workflow_run_id=workflow_run_id,
+                retry_of_log_id=retry_of_log_id,
+            )
+            if not isinstance(collected_from_chat, dict):
+                collected_from_chat = None
+
+        refreshed_gate = await self.profile_gate_service.evaluate_gate(
+            user_id,
+            intent=detected_intent,
+            chat_id=chat_id,
+            workflow_run_id=workflow_run_id,
+            retry_of_log_id=retry_of_log_id,
+        )
+        if refreshed_gate.get("profile_id"):
+            clarifications = clarification_submission
+            if not isinstance(clarifications, dict):
+                clarifications = await self.profile_gate_service.get_profile_clarifications(
+                    user_id=user_id,
+                    profile_id=str(refreshed_gate["profile_id"]),
+                    chat_id=chat_id,
+                    workflow_run_id=workflow_run_id,
+                    retry_of_log_id=retry_of_log_id,
+                )
+            clarification_field = self._extract_clarification_field(clarifications)
+            clarification_question = self._extract_clarification_question(clarifications)
+
+        return refreshed_gate, collected_from_chat, clarification_field, clarification_question
+
     async def post_assistant_notice(
         self,
         *,
@@ -633,6 +704,7 @@ class ChatService:
     ) -> dict[str, Any]:
         """Persist an assistant-authored notice message for system-driven follow-ups."""
         chat = await self._get_chat_or_404(chat_id, user_id)
+        message_metadata = self._augment_metadata_with_active_profile_slot(metadata, content)
 
         assistant_message_id = str(uuid.uuid4())
         assistant_message = await self.message_repo.create(
@@ -640,7 +712,7 @@ class ChatService:
             chat_id=chat_id,
             role="assistant",
             content=content,
-            metadata=metadata,
+            metadata=message_metadata,
         )
 
         await self.chat_repo.increment_message_count(chat_id, increment=1)
@@ -649,8 +721,8 @@ class ChatService:
         # from the first assistant notice so the chat is not shown as untitled.
         if int(chat.get("message_count") or 0) == 0:
             preferred_title = None
-            if isinstance(metadata, dict):
-                candidate_title = metadata.get("notice_title")
+            if isinstance(message_metadata, dict):
+                candidate_title = message_metadata.get("notice_title")
                 if isinstance(candidate_title, str) and candidate_title.strip():
                     preferred_title = candidate_title.strip()
 
@@ -1260,6 +1332,61 @@ class ChatService:
             f"Let's start with your {first_missing}. Once you send that, I'll ask for the next detail."
         )
 
+    def _build_intent_gated_response(
+        self,
+        *,
+        detected_intent: str,
+        missing_fields: list[str],
+        clarification_question: Optional[str] = None,
+    ) -> str:
+        if clarification_question:
+            return clarification_question
+
+        if not missing_fields:
+            return (
+                "I need to finish your profile before I can continue with this request. "
+                "Please update your profile and try again."
+            )
+
+        intent_labels = {
+            "program_discovery": "discover programs",
+            "scholarship_search": "search scholarships",
+            "eligibility_check": "check eligibility",
+            "application_planning": "plan applications",
+            "apply_to_named_school": "plan your application",
+        }
+        action_label = intent_labels.get(detected_intent, "help with this request")
+        first_missing = self._format_profile_field_label(missing_fields[0])
+        return (
+            f"I can help {action_label}, but I need to finish your profile first. "
+            f"Please share your {first_missing}."
+        )
+
+    @staticmethod
+    def _is_explicit_intent_request(content: str, detected_intent: str) -> bool:
+        lowered = (content or "").strip().lower()
+        if not lowered:
+            return False
+
+        if detected_intent == "program_discovery":
+            return any(token in lowered for token in ["discover", "find", "search", "explore"]) and any(
+                token in lowered for token in ["program", "degree", "university", "school", "course", "major"]
+            )
+
+        if detected_intent == "scholarship_search":
+            return any(token in lowered for token in ["scholarship", "funding", "grant", "financial aid"])
+
+        if detected_intent == "eligibility_check":
+            return any(token in lowered for token in ["eligible", "eligibility", "qualify", "qualified"])
+
+        if detected_intent in {"application_planning", "apply_to_named_school"}:
+            return any(
+                token in lowered
+                for token in ["application", "apply", "deadline", "statement of purpose", "cover letter", "timeline"]
+            )
+
+        return False
+
     @staticmethod
     def _extract_clarification_question(clarifications: Optional[dict[str, Any]]) -> Optional[str]:
         if not isinstance(clarifications, dict):
@@ -1297,26 +1424,8 @@ class ChatService:
         return None
 
     @staticmethod
-    def _is_binary_reply(content: str) -> bool:
-        normalized = re.sub(r"[^a-z]", "", (content or "").strip().lower())
-        return normalized in {
-            "yes",
-            "y",
-            "yeah",
-            "yep",
-            "no",
-            "n",
-            "nope",
-            "nah",
-        }
-
-    @classmethod
-    def _is_binary_clarification_prompt(cls, latest_assistant_message: Optional[dict[str, Any]]) -> bool:
+    def _is_profile_gate_followup_prompt(latest_assistant_message: Optional[dict[str, Any]]) -> bool:
         if not isinstance(latest_assistant_message, dict):
-            return False
-
-        content = str(latest_assistant_message.get("content") or "").strip()
-        if not content:
             return False
 
         metadata = latest_assistant_message.get("metadata")
@@ -1324,13 +1433,174 @@ class ChatService:
             return False
 
         profile_gate = metadata.get("profile_gate")
-        if not isinstance(profile_gate, dict) or profile_gate.get("allowed") is not False:
+        if not isinstance(profile_gate, dict):
             return False
 
-        if re.search(r"\b(do|did|have|has|are|is|was|were|can|could|would|will|should)\b", content, re.IGNORECASE):
-            return "?" in content
+        if profile_gate.get("allowed") is not False:
+            return False
 
-        return bool(re.search(r"\byes|no\b", content, re.IGNORECASE))
+        reason = str(profile_gate.get("reason") or "")
+        return reason not in {"intent_out_of_scope", "intent_agent_unavailable"}
+
+    @classmethod
+    def _augment_metadata_with_active_profile_slot(
+        cls,
+        metadata: Optional[dict[str, Any]],
+        content: str,
+    ) -> dict[str, Any]:
+        enriched = dict(metadata or {})
+        if isinstance(enriched.get("active_profile_slot"), dict):
+            return enriched
+
+        inferred_slot = cls._infer_active_profile_slot_from_content(content)
+        if inferred_slot is not None:
+            enriched["active_profile_slot"] = inferred_slot
+        return enriched
+
+    @classmethod
+    def _build_active_profile_slot(
+        cls,
+        *,
+        clarification_field: Optional[str],
+        missing_fields: list[str],
+        clarification_question: Optional[str],
+        assistant_content: str,
+    ) -> Optional[dict[str, Any]]:
+        if clarification_question and clarification_field:
+            return {
+                "field": clarification_field,
+                "label": cls._format_profile_field_label(clarification_field),
+                "expected_type": cls._profile_field_expected_type(clarification_field),
+                "source": "clarification_queue",
+            }
+
+        inferred = cls._infer_active_profile_slot_from_content(assistant_content)
+        if inferred is not None:
+            return inferred
+
+        if missing_fields:
+            field = str(missing_fields[0] or "").strip()
+            if field:
+                return {
+                    "field": field,
+                    "label": cls._format_profile_field_label(field),
+                    "expected_type": cls._profile_field_expected_type(field),
+                    "source": "profile_gate_missing_field",
+                }
+        return None
+
+    @classmethod
+    def _extract_active_profile_slot(
+        cls,
+        latest_assistant_message: Optional[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        if not isinstance(latest_assistant_message, dict):
+            return None
+
+        metadata = latest_assistant_message.get("metadata")
+        if isinstance(metadata, dict):
+            existing_slot = metadata.get("active_profile_slot")
+            if isinstance(existing_slot, dict):
+                field = str(existing_slot.get("field") or "").strip()
+                if field:
+                    return {
+                        "field": field,
+                        "label": str(existing_slot.get("label") or cls._format_profile_field_label(field)),
+                        "expected_type": str(
+                            existing_slot.get("expected_type") or cls._profile_field_expected_type(field)
+                        ),
+                        "source": str(existing_slot.get("source") or "profile_gate_missing_field"),
+                    }
+
+        return cls._infer_active_profile_slot_from_content(str(latest_assistant_message.get("content") or ""))
+
+    @classmethod
+    def _infer_active_profile_slot_from_content(cls, content: str) -> Optional[dict[str, Any]]:
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        prompt_patterns = (
+            r"(?:Let's start with your|Next, please share your)\s+{label}\b",
+            r"What is your\s+{label}\?",
+            r"Please share your\s+{label}\b",
+        )
+        candidate_fields = [
+            "current_degree_level",
+            "target_degree_level",
+            "gpa",
+            "gpa_scale",
+            "intended_field_of_study",
+            "target_study_country",
+            "enrollment_timeline",
+            "funding_source",
+            "email",
+            "full_name",
+        ]
+        for field in candidate_fields:
+            label = re.escape(cls._format_profile_field_label(field))
+            for template in prompt_patterns:
+                if re.search(template.format(label=label), text, flags=re.IGNORECASE):
+                    return {
+                        "field": field,
+                        "label": cls._format_profile_field_label(field),
+                        "expected_type": cls._profile_field_expected_type(field),
+                        "source": "message_inference",
+                    }
+        return None
+
+    @classmethod
+    def _extract_slot_bound_profile_updates(
+        cls,
+        content: str,
+        active_profile_slot: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not isinstance(active_profile_slot, dict):
+            return {}
+
+        field = str(active_profile_slot.get("field") or "").strip()
+        if not field:
+            return {}
+
+        if field in {"current_degree_level", "target_degree_level"}:
+            normalized_degree = cls._normalize_degree_level_reply(content)
+            if normalized_degree:
+                return {field: normalized_degree}
+
+        extracted = ProfileGateService.extract_profile_fields_from_chat(content, [field])
+        if not isinstance(extracted, dict) or field not in extracted:
+            return {}
+        return {key: value for key, value in extracted.items() if value is not None}
+
+    @staticmethod
+    def _normalize_degree_level_reply(content: str) -> Optional[str]:
+        lowered = (content or "").strip().lower()
+        if not lowered:
+            return None
+
+        if re.search(r"\b(phd|doctorate|doctoral)\b", lowered):
+            return "phd"
+        if re.search(r"\b(master|masters|master's|mba|m\.?sc|ms)\b", lowered):
+            return "master"
+        if re.search(r"\b(bachelor|bachelors|bachelor's|b\.?sc|bs|ba|undergraduate)\b", lowered):
+            return "bachelor"
+        if re.search(r"\b(high school|highschool)\b", lowered):
+            return "high_school"
+        return None
+
+    @staticmethod
+    def _profile_field_expected_type(field: str) -> str:
+        if field in {"current_degree_level", "target_degree_level"}:
+            return "degree_level"
+        if field in {"gpa", "gpa_scale", "gpa_highest"}:
+            return "numeric"
+        if field == "target_study_country":
+            return "country"
+        if field == "enrollment_timeline":
+            return "timeline"
+        if field == "funding_source":
+            return "funding_source"
+        return "text"
 
     @staticmethod
     def _format_profile_field_label(field: str) -> str:

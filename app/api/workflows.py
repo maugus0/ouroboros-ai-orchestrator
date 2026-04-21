@@ -126,7 +126,9 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
         if isinstance(profile_data, dict) and isinstance(profile_id, str) and profile_id:
             clarifications = await profile_gate_service.get_profile_clarifications(user_id, profile_id)
             if isinstance(clarifications, dict):
-                profile_data["clarification_queue"] = clarifications.get("clarification_queue", profile_data.get("clarification_queue", []))
+                profile_data["clarification_queue"] = clarifications.get(
+                    "clarification_queue", profile_data.get("clarification_queue", [])
+                )
                 profile_data["react_decision_trace"] = clarifications.get(
                     "react_decision_trace", profile_data.get("react_decision_trace", {})
                 )

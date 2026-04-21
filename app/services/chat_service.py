@@ -483,22 +483,16 @@ class ChatService:
                             retry_of_log_id=retry_of_log_id,
                         )
 
-                    if gate["allowed"]:
-                        if target_agent == "program-discovery":
-                            await self._attempt_program_discovery_probe(user_id=user_id, chat_id=chat_id)
-                        assistant_content = self._build_intent_ready_response(
-                            detected_intent,
-                            content,
-                            gate,
-                        )
-                    else:
-                        assistant_content = self._build_profile_gate_response(
-                            _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
-                            applied_fields=_as_string_list((collected_from_chat or {}).get("applied_fields")),
-                            pending_clarification_fields=_as_string_list(
-                                (collected_from_chat or {}).get("pending_clarification_fields")
-                            ),
-                        )
+                    assistant_content, gate = await self._resolve_assistant_content(
+                        gate=gate,
+                        collected_from_chat=collected_from_chat,
+                        detected_intent=detected_intent,
+                        target_agent=target_agent,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        content=content,
+                        workflow_run_id=workflow_run_id,
+                    )
 
                     self._set_cached_response(
                         cache_key,
@@ -731,6 +725,181 @@ class ChatService:
                 error=str(exc),
             )
 
+    async def _handle_program_discovery(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+    ) -> str:
+        """Call Program Discovery Agent to answer a program-related question.
+
+        Uses PDA's /chat/ask endpoint which has LLM integration (OpenAI/Anthropic)
+        and access to institutions with QS World Rankings data.
+        Falls back to a helpful message if the PDA call fails.
+        """
+        started_at = time.perf_counter()
+        try:
+            result = await self.program_discovery_client.ask_question(
+                question=content,
+                user_id=user_id,
+                session_id=chat_id,
+            )
+
+            await self._record_program_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="chat_ask",
+                request_method="POST",
+                request_path="/chat/ask",
+                call_status="success",
+                request_payload={"question": content},
+                response_payload=self._truncate_response_for_logging(result),
+                latency_ms=self._elapsed_ms(started_at),
+            )
+
+            if isinstance(result, dict):
+                answer = result.get("answer") or result.get("response")
+                if not answer and isinstance(result.get("data"), dict):
+                    answer = result["data"].get("answer") or result["data"].get("response")
+                if answer and isinstance(answer, str) and answer.strip():
+                    return answer.strip()
+
+            logger.warning(
+                "program_discovery_unexpected_response_shape",
+                user_id=user_id,
+                chat_id=chat_id,
+                response_keys=list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+            )
+            return (
+                "I found some information about programs but had trouble formatting the response. "
+                "Could you try rephrasing your question? For example, ask about specific fields, "
+                "countries, or universities."
+            )
+
+        except AgentClientError as exc:
+            await self._record_program_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="chat_ask",
+                request_method="POST",
+                request_path="/chat/ask",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload={"question": content},
+                latency_ms=self._elapsed_ms(started_at),
+            )
+            logger.error(
+                "program_discovery_call_failed",
+                user_id=user_id,
+                chat_id=chat_id,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return (
+                "I tried to look up program information for you, but the program discovery "
+                "service encountered an issue. Please try again in a moment."
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "program_discovery_unexpected_error",
+                user_id=user_id,
+                chat_id=chat_id,
+                error=str(exc),
+            )
+            return "I ran into an unexpected issue while searching for programs. " "Please try again shortly."
+
+    async def _record_program_discovery_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        user_id: str,
+        chat_id: Optional[str],
+        workflow_run_id: Optional[str],
+        operation: str,
+        request_method: Optional[str],
+        request_path: Optional[str],
+        call_status: str,
+        http_status: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+        request_payload: Optional[dict[str, Any]] = None,
+        response_payload: Optional[dict[str, Any]] = None,
+        latency_ms: Optional[int] = None,
+    ) -> None:
+        """Log a PDA agent call for audit trail."""
+        repo = self.agent_call_log_repo
+        if repo is None:
+            return
+        try:
+            await repo.create_log(
+                log_id=str(uuid.uuid4()),
+                workflow_run_id=workflow_run_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                target_service="program-discovery",
+                operation=operation,
+                request_method=request_method,
+                request_path=request_path,
+                attempt_number=1,
+                status=call_status,
+                http_status=http_status,
+                error_code=error_code,
+                error_message=error_message,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                latency_ms=latency_ms,
+                retry_of_log_id=None,
+            )
+        except (aiomysql.Error, RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning("pda_call_log_write_failed", operation=operation, error=str(exc))
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        """Convert perf_counter start time to elapsed milliseconds."""
+        return max(0, int((time.perf_counter() - started_at) * 1000))
+
+    @staticmethod
+    def _truncate_response_for_logging(
+        result: Any, max_answer_len: int = 500, max_items: int = 5
+    ) -> Optional[dict[str, Any]]:
+        """Truncate PDA response to bounded subset for agent_call_logs storage.
+
+        Extracts key metadata (answer length, counts) without storing full arrays
+        that could bloat the database or exceed column limits.
+        """
+        if not isinstance(result, dict):
+            return None
+
+        truncated: dict[str, Any] = {}
+
+        answer = result.get("answer") or result.get("response")
+        if isinstance(answer, str):
+            truncated["answer_length"] = len(answer)
+            truncated["answer_preview"] = answer[:max_answer_len] + ("..." if len(answer) > max_answer_len else "")
+
+        for key in ("programs", "institutions", "sources", "results"):
+            if isinstance(result.get(key), list):
+                items = result[key]
+                truncated[f"{key}_count"] = len(items)
+                if items and isinstance(items[0], dict):
+                    truncated[f"{key}_ids"] = [item.get("id") for item in items[:max_items] if item.get("id")]
+
+        for key in ("status", "intent", "query", "session_id", "model"):
+            if key in result:
+                truncated[key] = result[key]
+
+        if isinstance(result.get("data"), dict):
+            data = result["data"]
+            if isinstance(data.get("answer"), str):
+                truncated["data_answer_length"] = len(data["answer"])
+
+        return truncated if truncated else None
+
     async def _create_workflow_run(
         self,
         *,
@@ -792,6 +961,129 @@ class ChatService:
         except (aiomysql.Error, RuntimeError, ValueError, TypeError) as exc:  # pragma: no cover
             logger.warning("agent_call_log_lookup_failed", user_id=user_id, chat_id=chat_id, error=str(exc))
             return None
+
+    async def _has_recent_profile_gate_reminder(self, chat_id: str) -> bool:
+        """Check if user was already reminded about incomplete profile in this chat.
+
+        Returns True if there's a recent assistant message with profile gate denial,
+        indicating the user has already been told about missing profile fields.
+        """
+        try:
+            recent = await self.message_repo.list_by_chat(chat_id=chat_id, limit=10, order="desc")
+        except (aiomysql.Error, RuntimeError, ValueError, TypeError) as exc:
+            logger.warning("profile_gate_reminder_lookup_failed", chat_id=chat_id, error=str(exc))
+            return False
+
+        if not isinstance(recent, list):
+            return False
+
+        for message in recent:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").lower() != "assistant":
+                continue
+
+            metadata = message.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+
+            profile_gate = metadata.get("profile_gate")
+            if not isinstance(profile_gate, dict):
+                continue
+
+            if profile_gate.get("allowed") is False:
+                reason = str(profile_gate.get("reason") or "")
+                if "profile_incomplete" in reason:
+                    return True
+
+        return False
+
+    async def _resolve_assistant_content(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        gate: dict[str, Any],
+        collected_from_chat: Optional[dict[str, Any]],
+        detected_intent: str,
+        target_agent: Optional[str],
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Generate assistant content based on profile gate status and intent.
+
+        If gate is allowed, generate appropriate response for the intent.
+        If gate is denied but user was already reminded, allow bypass for domain queries.
+        Otherwise, return profile completion guidance.
+
+        Returns (assistant_content, updated_gate).
+        """
+        if gate["allowed"]:
+            response = await self._generate_intent_response(
+                detected_intent=detected_intent,
+                target_agent=target_agent,
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                gate=gate,
+            )
+            return response, gate
+
+        applied_fields = _as_string_list((collected_from_chat or {}).get("applied_fields"))
+        no_fields_extracted = not applied_fields
+        is_domain_query = detected_intent not in {"profile_completion", "out_of_scope"}
+        was_already_reminded = await self._has_recent_profile_gate_reminder(chat_id)
+
+        if no_fields_extracted and is_domain_query and was_already_reminded:
+            logger.info(
+                "profile_gate_bypass_after_reminder",
+                user_id=user_id,
+                chat_id=chat_id,
+                detected_intent=detected_intent,
+                target_agent=target_agent,
+            )
+            updated_gate = {**gate, "allowed": True, "reason": "bypass_after_reminder"}
+            response = await self._generate_intent_response(
+                detected_intent=detected_intent,
+                target_agent=target_agent,
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                gate=updated_gate,
+            )
+            return response, updated_gate
+
+        response = self._build_profile_gate_response(
+            _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
+            applied_fields=applied_fields,
+            pending_clarification_fields=_as_string_list(
+                (collected_from_chat or {}).get("pending_clarification_fields")
+            ),
+        )
+        return response, gate
+
+    async def _generate_intent_response(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        detected_intent: str,
+        target_agent: Optional[str],
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        gate: dict[str, Any],
+    ) -> str:
+        """Generate response for allowed intent - either PDA call or static response."""
+        if target_agent == "program-discovery" and detected_intent == "program_discovery":
+            return await self._handle_program_discovery(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+            )
+        return self._build_intent_ready_response(detected_intent, content, gate)
 
     async def _get_latest_assistant_message(self, chat_id: str) -> Optional[dict[str, Any]]:
         """Fetch the latest assistant turn for clarification-aware intent handling."""
@@ -1005,14 +1297,9 @@ class ChatService:
             )
 
         if detected_intent == "program_discovery":
-            if "singapore" in lowered:
-                return (
-                    "Great, I can help discover graduate programs in Singapore that fit your profile. "
-                    "Share your preferred field or university (for example NUS or NTU), and I will narrow the options."
-                )
             return (
-                "Great, I can help discover programs that fit your profile. "
-                "Tell me your target country or preferred universities, and I will narrow the best matches."
+                "I can help discover programs that fit your profile. "
+                "Tell me what field, country, or university you're interested in."
             )
 
         if detected_intent == "scholarship_search":

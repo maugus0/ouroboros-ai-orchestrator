@@ -64,7 +64,7 @@ class IntentRegistryService:
             self._registry_cache = dict(_FALLBACK_REGISTRY)
             return self._registry_cache
 
-    def detect_intent(self, content: str) -> str:
+    def detect_intent(self, content: str) -> str:  # pylint: disable=too-many-return-statements,too-many-branches
         """Use deterministic keyword rules for first-pass intent detection."""
         lowered = (content or "").strip().lower()
         if not lowered:
@@ -93,34 +93,379 @@ class IntentRegistryService:
         if re.fullmatch(r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?", lowered) or re.fullmatch(r"\d+(?:\.\d+)?", lowered):
             return "profile_completion"
 
-        if any(token in lowered for token in ["discover", "find", "search", "explore"]):
-            if any(token in lowered for token in ["program", "university", "school", "course", "major"]):
-                return "program_discovery"
-            if any(token in lowered for token in ["scholarship", "funding", "grant"]):
-                return "scholarship_search"
-
-        if any(token in lowered for token in ["scholarship", "funding", "grant", "financial aid"]):
-            return "scholarship_search"
-        if any(token in lowered for token in ["program", "major", "course", "university", "school"]):
-            if any(token in lowered for token in ["apply", "application", "deadline", "requirements"]):
-                return "apply_to_named_school"
-            return "program_discovery"
-        if any(token in lowered for token in ["eligible", "eligibility", "qualify", "qualified", "requirements"]):
-            return "eligibility_check"
         if any(
             token in lowered
-            for token in ["application plan", "application timeline", "statement of purpose", "cover letter"]
-        ):
-            return "application_planning"
-        if any(
-            token in lowered
-            for token in ["cv", "resume", "upload", "transcript", "document", "processing", "analysis", "feedback"]
+            for token in ["cv", "resume", "upload my", "transcript", "my document", "processing", "feedback"]
         ):
             return "profile_completion"
         if any(token in lowered for token in ["profile", "my gpa", "my degree", "my background", "update my"]):
             return "profile_completion"
 
+        if self._is_program_discovery_query(lowered):
+            if self._has_application_keywords(lowered) and self._has_university_mention(lowered):
+                return "apply_to_named_school"
+            return "program_discovery"
+
+        if any(token in lowered for token in ["scholarship", "funding", "grant", "financial aid"]):
+            return "scholarship_search"
+
+        if any(token in lowered for token in ["eligible", "eligibility", "qualify", "qualified"]):
+            if self._is_program_discovery_query(lowered):
+                return "program_discovery"
+            return "eligibility_check"
+
+        if any(
+            token in lowered
+            for token in ["application plan", "application timeline", "statement of purpose", "cover letter"]
+        ):
+            return "application_planning"
+
         return "out_of_scope"
+
+    def _is_program_discovery_query(self, lowered: str) -> bool:
+        """Check if query is related to programs, universities, or institutions."""
+        program_keywords = {
+            "program",
+            "programs",
+            "university",
+            "universities",
+            "school",
+            "schools",
+            "course",
+            "courses",
+            "major",
+            "majors",
+            "institution",
+            "institutions",
+            "college",
+            "colleges",
+            "degree",
+            "degrees",
+            "admission",
+            "admissions",
+            "graduate",
+            "postgraduate",
+            "undergraduate",
+            "study",
+            "studying",
+        }
+
+        ranking_keywords = {
+            "ranking",
+            "rankings",
+            "ranked",
+            "top",
+            "best",
+            "leading",
+            "prestigious",
+            "world class",
+            "highly ranked",
+        }
+
+        requirement_keywords = {
+            "requirement",
+            "requirements",
+            "gpa requirement",
+            "gmat",
+            "gre",
+            "toefl",
+            "ielts",
+            "sat",
+            "act",
+            "prerequisite",
+            "prerequisites",
+            "qualify",
+            "qualified",
+            "eligible",
+            "eligibility",
+            "need to apply",
+            "how to apply",
+        }
+
+        cost_keywords = {
+            "tuition",
+            "fee",
+            "fees",
+            "cost",
+            "costs",
+            "affordable",
+            "expensive",
+            "cheap",
+            "budget",
+            "price",
+        }
+
+        deadline_keywords = {
+            "deadline",
+            "deadlines",
+            "due date",
+            "application date",
+            "apply by",
+            "last date",
+            "intake",
+            "semester",
+        }
+
+        comparison_keywords = {
+            "compare",
+            "comparison",
+            "vs",
+            "versus",
+            "better",
+            "difference between",
+            "which is better",
+            "should i choose",
+        }
+
+        field_keywords = {
+            "computer science",
+            "data science",
+            "artificial intelligence",
+            "machine learning",
+            "engineering",
+            "mechanical",
+            "electrical",
+            "civil",
+            "chemical",
+            "biomedical",
+            "business",
+            "mba",
+            "finance",
+            "accounting",
+            "marketing",
+            "economics",
+            "management",
+            "medicine",
+            "medical",
+            "law",
+            "legal",
+            "psychology",
+            "biology",
+            "chemistry",
+            "physics",
+            "mathematics",
+            "statistics",
+            "environmental",
+            "architecture",
+            "design",
+            "arts",
+            "humanities",
+            "social science",
+            "political science",
+            "international relations",
+            "public policy",
+            "public health",
+            "nursing",
+            "pharmacy",
+            "education",
+            "journalism",
+            "communications",
+            "media",
+            "information technology",
+            "cybersecurity",
+            "blockchain",
+            "fintech",
+            "supply chain",
+            "operations",
+            "analytics",
+            "stem",
+        }
+
+        if any(kw in lowered for kw in program_keywords):
+            return True
+        if any(kw in lowered for kw in ranking_keywords):
+            return True
+        if any(kw in lowered for kw in requirement_keywords):
+            return True
+        if any(kw in lowered for kw in cost_keywords):
+            return True
+        if any(kw in lowered for kw in deadline_keywords):
+            return True
+        if any(kw in lowered for kw in comparison_keywords):
+            return True
+        if any(kw in lowered for kw in field_keywords):
+            return True
+
+        if self._has_university_mention(lowered):
+            return True
+
+        return False
+
+    def _has_university_mention(self, lowered: str) -> bool:
+        """Check if query mentions a university by name or pattern."""
+        well_known_universities = {
+            "nus",
+            "ntu",
+            "smu",
+            "sutd",
+            "sit",
+            "mit",
+            "stanford",
+            "harvard",
+            "oxford",
+            "cambridge",
+            "berkeley",
+            "yale",
+            "princeton",
+            "columbia",
+            "caltech",
+            "ucla",
+            "usc",
+            "nyu",
+            "upenn",
+            "penn",
+            "cornell",
+            "brown",
+            "dartmouth",
+            "duke",
+            "northwestern",
+            "uchicago",
+            "johns hopkins",
+            "carnegie mellon",
+            "cmu",
+            "georgia tech",
+            "gatech",
+            "umich",
+            "michigan",
+            "ut austin",
+            "texas",
+            "uiuc",
+            "illinois",
+            "purdue",
+            "wisconsin",
+            "washington",
+            "eth zurich",
+            "eth",
+            "epfl",
+            "imperial",
+            "ucl",
+            "lse",
+            "kings college",
+            "edinburgh",
+            "manchester",
+            "warwick",
+            "bristol",
+            "birmingham",
+            "leeds",
+            "nottingham",
+            "southampton",
+            "glasgow",
+            "sheffield",
+            "durham",
+            "exeter",
+            "insead",
+            "hec",
+            "iese",
+            "london business school",
+            "lbs",
+            "wharton",
+            "kellogg",
+            "booth",
+            "sloan",
+            "haas",
+            "tuck",
+            "ross",
+            "fuqua",
+            "stern",
+            "iit",
+            "iim",
+            "iisc",
+            "bits",
+            "tsinghua",
+            "peking",
+            "fudan",
+            "shanghai jiao tong",
+            "zhejiang",
+            "nanjing",
+            "wuhan",
+            "tokyo",
+            "kyoto",
+            "osaka",
+            "tohoku",
+            "nagoya",
+            "waseda",
+            "keio",
+            "seoul national",
+            "snu",
+            "kaist",
+            "postech",
+            "yonsei",
+            "korea university",
+            "hanyang",
+            "hku",
+            "cuhk",
+            "hkust",
+            "polyu",
+            "melbourne",
+            "sydney",
+            "unsw",
+            "anu",
+            "queensland",
+            "monash",
+            "adelaide",
+            "auckland",
+            "toronto",
+            "ubc",
+            "mcgill",
+            "waterloo",
+            "alberta",
+            "montreal",
+            "delft",
+            "tu munich",
+            "tum",
+            "rwth",
+            "heidelberg",
+            "lmu",
+            "kit",
+            "tu berlin",
+            "humboldt",
+            "sorbonne",
+            "ecole polytechnique",
+            "sciences po",
+            "bocconi",
+            "politecnico",
+            "tu vienna",
+            "kth",
+            "chalmers",
+            "dtu",
+            "aalto",
+            "leiden",
+            "amsterdam",
+            "utrecht",
+            "wageningen",
+            "lund",
+            "upssala",
+            "copenhagen",
+            "technion",
+            "hebrew university",
+            "tel aviv",
+        }
+
+        if any(uni in lowered for uni in well_known_universities):
+            return True
+
+        university_patterns = [
+            r"\bat\s+\w+(?:\s+\w+)?\s*(?:university|college|institute|school)\b",
+            r"\b\w+(?:\s+\w+)?\s*(?:university|college|institute|school)\b",
+            r"\buniversity\s+of\s+\w+(?:\s+\w+)?\b",
+            r"\b\w+'s\s+(?:programs?|courses?|degrees?|graduate|mba|masters?|phd)\b",
+            r"\bprograms?\s+at\s+\w+\b",
+            r"\bstudying\s+at\s+\w+\b",
+            r"\badmission\s+to\s+\w+\b",
+        ]
+
+        for pattern in university_patterns:
+            if re.search(pattern, lowered):
+                return True
+
+        return False
+
+    @staticmethod
+    def _has_application_keywords(lowered: str) -> bool:
+        """Check if query has application-related keywords."""
+        return any(
+            token in lowered for token in ["apply", "application", "deadline", "how to apply", "apply to", "applying"]
+        )
 
     def get_policy(self, intent: str) -> dict[str, Any]:
         """Return policy object for an intent, falling back to out-of-scope."""

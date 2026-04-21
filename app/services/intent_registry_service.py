@@ -161,6 +161,12 @@ class IntentRegistryService:
             "prestigious",
             "world class",
             "highly ranked",
+            "qs",
+            "qs world",
+            "times higher education",
+            "the ranking",
+            "arwu",
+            "shanghai ranking",
         }
 
         requirement_keywords = {
@@ -446,18 +452,25 @@ class IntentRegistryService:
             return True
 
         university_patterns = [
-            r"\bat\s+\w+(?:\s+\w+)?\s*(?:university|college|institute|school)\b",
-            r"\b\w+(?:\s+\w+)?\s*(?:university|college|institute|school)\b",
+            r"\bat\s+\w+(?:\s+\w+)?\s*(?:university|universities|college|colleges|institute|school|uni)\b",
+            r"\b\w+(?:\s+\w+)?\s*(?:university|universities|college|colleges|institute|institutes|school|uni)\b",
             r"\buniversity\s+of\s+\w+(?:\s+\w+)?\b",
             r"\b\w+'s\s+(?:programs?|courses?|degrees?|graduate|mba|masters?|phd)\b",
             r"\bprograms?\s+at\s+\w+\b",
             r"\bstudying\s+at\s+\w+\b",
             r"\badmission\s+to\s+\w+\b",
+            r"\babout\s+\w+(?:\s+\w+)?\s+(?:uni|university|college|institute)\b",
+            r"\b\w+\s+uni\s+from\s+qs\b",
+            r"\bdetails?\s+(?:about|of)\s+\w+(?:\s+\w+)?\s+(?:from\s+)?(?:qs|ranking|rankings)\b",
+            r"\b\w+(?:\s+\w+)?\s+from\s+qs(?:\s+ranking|\s+rankings)?\b",
         ]
 
         for pattern in university_patterns:
             if re.search(pattern, lowered):
                 return True
+
+        if "from qs" in lowered or "qs ranking" in lowered or "qs world" in lowered:
+            return True
 
         return False
 

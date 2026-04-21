@@ -484,13 +484,19 @@ class ChatService:
                         )
 
                     if gate["allowed"]:
-                        if target_agent == "program-discovery":
-                            await self._attempt_program_discovery_probe(user_id=user_id, chat_id=chat_id)
-                        assistant_content = self._build_intent_ready_response(
-                            detected_intent,
-                            content,
-                            gate,
-                        )
+                        if target_agent == "program-discovery" and detected_intent == "program_discovery":
+                            assistant_content = await self._handle_program_discovery(
+                                user_id=user_id,
+                                chat_id=chat_id,
+                                content=content,
+                                workflow_run_id=workflow_run_id,
+                            )
+                        else:
+                            assistant_content = self._build_intent_ready_response(
+                                detected_intent,
+                                content,
+                                gate,
+                            )
                     else:
                         assistant_content = self._build_profile_gate_response(
                             _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
@@ -730,6 +736,144 @@ class ChatService:
                 status_code=exc.status_code,
                 error=str(exc),
             )
+
+    async def _handle_program_discovery(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+    ) -> str:
+        """Call Program Discovery Agent to answer a program-related question.
+
+        Uses PDA's /chat/ask endpoint which has LLM integration (OpenAI/Anthropic)
+        and access to institutions with QS World Rankings data.
+        Falls back to a helpful message if the PDA call fails.
+        """
+        started_at = time.perf_counter()
+        try:
+            result = await self.program_discovery_client.ask_question(
+                question=content,
+                user_id=user_id,
+                session_id=chat_id,
+            )
+
+            await self._record_program_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="chat_ask",
+                request_method="POST",
+                request_path="/chat/ask",
+                call_status="success",
+                request_payload={"question": content},
+                response_payload=result if isinstance(result, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
+            )
+
+            if isinstance(result, dict):
+                answer = result.get("answer") or result.get("response")
+                if not answer and isinstance(result.get("data"), dict):
+                    answer = result["data"].get("answer") or result["data"].get("response")
+                if answer and isinstance(answer, str) and answer.strip():
+                    return answer.strip()
+
+            logger.warning(
+                "program_discovery_unexpected_response_shape",
+                user_id=user_id,
+                chat_id=chat_id,
+                response_keys=list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+            )
+            return (
+                "I found some information about programs but had trouble formatting the response. "
+                "Could you try rephrasing your question? For example, ask about specific fields, "
+                "countries, or universities."
+            )
+
+        except AgentClientError as exc:
+            await self._record_program_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="chat_ask",
+                request_method="POST",
+                request_path="/chat/ask",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload={"question": content},
+                latency_ms=self._elapsed_ms(started_at),
+            )
+            logger.error(
+                "program_discovery_call_failed",
+                user_id=user_id,
+                chat_id=chat_id,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return (
+                "I tried to look up program information for you, but the program discovery "
+                "service encountered an issue. Please try again in a moment."
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "program_discovery_unexpected_error",
+                user_id=user_id,
+                chat_id=chat_id,
+                error=str(exc),
+            )
+            return "I ran into an unexpected issue while searching for programs. " "Please try again shortly."
+
+    async def _record_program_discovery_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        user_id: str,
+        chat_id: Optional[str],
+        workflow_run_id: Optional[str],
+        operation: str,
+        request_method: Optional[str],
+        request_path: Optional[str],
+        call_status: str,
+        http_status: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+        request_payload: Optional[dict[str, Any]] = None,
+        response_payload: Optional[dict[str, Any]] = None,
+        latency_ms: Optional[int] = None,
+    ) -> None:
+        """Log a PDA agent call for audit trail."""
+        repo = self.agent_call_log_repo
+        if repo is None:
+            return
+        try:
+            await repo.create_log(
+                log_id=str(uuid.uuid4()),
+                workflow_run_id=workflow_run_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                target_service="program-discovery",
+                operation=operation,
+                request_method=request_method,
+                request_path=request_path,
+                attempt_number=1,
+                status=call_status,
+                http_status=http_status,
+                error_code=error_code,
+                error_message=error_message,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                latency_ms=latency_ms,
+                retry_of_log_id=None,
+            )
+        except (aiomysql.Error, RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning("pda_call_log_write_failed", operation=operation, error=str(exc))
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        """Convert perf_counter start time to elapsed milliseconds."""
+        return max(0, int((time.perf_counter() - started_at) * 1000))
 
     async def _create_workflow_run(
         self,
@@ -1005,14 +1149,9 @@ class ChatService:
             )
 
         if detected_intent == "program_discovery":
-            if "singapore" in lowered:
-                return (
-                    "Great, I can help discover graduate programs in Singapore that fit your profile. "
-                    "Share your preferred field or university (for example NUS or NTU), and I will narrow the options."
-                )
             return (
-                "Great, I can help discover programs that fit your profile. "
-                "Tell me your target country or preferred universities, and I will narrow the best matches."
+                "I can help discover programs that fit your profile. "
+                "Tell me what field, country, or university you're interested in."
             )
 
         if detected_intent == "scholarship_search":

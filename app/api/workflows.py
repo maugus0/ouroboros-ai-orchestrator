@@ -87,31 +87,116 @@ async def retry_last_agent_call(
 
 
 @router.post("/profile-upload")
-async def upload_profile_document(
+async def upload_profile_document(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     file: UploadFile = File(...),
     intent: str = Form(default="profile_completion"),
     document_type: str = Form(default="cv"),
     target_degree_hint: str | None = Form(default=None),
     run_gap_analysis: bool = Form(default=False),
+    chat_id: str | None = Form(default=None),
     user_id: str = Depends(get_current_user_id),
     student_profile_client: StudentProfileClient = Depends(_get_student_profile_client),
     profile_gate_service: ProfileGateService = Depends(_get_profile_gate_service),
+    chat_service: ChatService = Depends(_get_chat_service),
 ):
-    """Forward a CV/transcript upload from orchestrator to student-profile processing."""
+    """Forward a CV/transcript upload from orchestrator to student-profile processing.
+
+    If chat_id is provided, posts an assistant notice with the parsing result to that chat.
+    This makes the upload visible in the chat history and auto-titles the chat.
+    """
     raw_bytes = await file.read()
     file_content_base64 = base64.b64encode(raw_bytes).decode("utf-8")
+    filename = file.filename or "uploaded_file"
 
-    result = await student_profile_client.parse_document_upload(
-        user_id=user_id,
-        file_name=file.filename or "uploaded_file",
-        file_content_base64=file_content_base64,
-        intent=intent,
-        document_type=document_type,
-        target_degree_hint=target_degree_hint,
-        run_gap_analysis=run_gap_analysis,
-    )
-    profile_gate_service.invalidate_readiness_cache(user_id, intent)
-    return result
+    try:
+        result = await student_profile_client.parse_document_upload(
+            user_id=user_id,
+            file_name=filename,
+            file_content_base64=file_content_base64,
+            intent=intent,
+            document_type=document_type,
+            target_degree_hint=target_degree_hint,
+            run_gap_analysis=run_gap_analysis,
+        )
+        profile_gate_service.invalidate_readiness_cache(user_id, intent)
+
+        if chat_id:
+            notice_content = _build_document_upload_notice(result, document_type, filename)
+            notice_title = _build_document_upload_title(document_type, filename)
+            await chat_service.post_assistant_notice(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=notice_content,
+                metadata={
+                    "notice_type": "document_upload",
+                    "notice_title": notice_title,
+                    "document_type": document_type,
+                    "file_name": filename,
+                    "intent": intent,
+                    "upload_result": result if isinstance(result, dict) else None,
+                },
+            )
+
+        return result
+
+    except Exception as exc:
+        if chat_id:
+            error_notice = (
+                f"I encountered an issue while processing your {document_type}. "
+                "Please try uploading again, or try a different file format."
+            )
+            await chat_service.post_assistant_notice(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=error_notice,
+                metadata={
+                    "notice_type": "document_upload_error",
+                    "document_type": document_type,
+                    "file_name": filename,
+                    "error": str(exc),
+                },
+            )
+        raise
+
+
+def _build_document_upload_notice(result: dict[str, Any] | None, document_type: str, filename: str) -> str:
+    """Build a human-readable notice message for document upload result."""
+    doc_label = "CV" if document_type == "cv" else document_type.replace("_", " ").title()
+
+    if not isinstance(result, dict):
+        return f"I've received your {doc_label} ({filename}) and it's being processed."
+
+    data = result.get("data") if isinstance(result.get("data"), dict) else result
+    extracted_fields = data.get("extracted_fields") or data.get("applied_fields") or []
+    gap_analysis = data.get("gap_analysis")
+
+    parts = [f"I've processed your {doc_label} ({filename})."]
+
+    if extracted_fields and isinstance(extracted_fields, list):
+        field_labels = [f.replace("_", " ") for f in extracted_fields[:5]]
+        fields_text = ", ".join(field_labels)
+        parts.append(f"I extracted the following information: {fields_text}.")
+        if len(extracted_fields) > 5:
+            parts.append(f"({len(extracted_fields) - 5} more fields updated)")
+
+    if isinstance(gap_analysis, dict):
+        gaps = gap_analysis.get("missing_for_intent") or gap_analysis.get("gaps") or []
+        if gaps and isinstance(gaps, list):
+            gap_labels = [g.replace("_", " ") for g in gaps[:3]]
+            gaps_text = ", ".join(gap_labels)
+            parts.append(f"To complete your profile, I still need: {gaps_text}.")
+
+    if not extracted_fields and not gap_analysis:
+        parts.append("Your profile has been updated with the extracted information.")
+
+    return " ".join(parts)
+
+
+def _build_document_upload_title(document_type: str, filename: str) -> str:
+    """Build a short title for chat from document upload."""
+    doc_label = "CV" if document_type == "cv" else document_type.replace("_", " ").title()
+    short_name = filename[:20] + "..." if len(filename) > 20 else filename
+    return f"{doc_label} Upload: {short_name}"
 
 
 def _map_chat_state(chat: dict[str, Any]) -> str:

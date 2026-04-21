@@ -952,17 +952,49 @@ class ProfileGateService:
         if lowered in degree_keywords:
             return False
 
+        degree_phrases = {
+            "master degree",
+            "masters degree",
+            "master's degree",
+            "bachelor degree",
+            "bachelors degree",
+            "bachelor's degree",
+            "phd degree",
+            "doctoral degree",
+            "doctorate degree",
+            "undergraduate degree",
+        }
+        if lowered in degree_phrases:
+            return False
+
         return len(normalized.split()) <= 5
 
     @staticmethod
     def _extract_bare_degree_level_candidate(text: str, degree_map: dict[str, str]) -> Optional[str]:
-        normalized_text = text.strip().strip(".,")
+        normalized_text = text.strip().strip(".,").lower()
         if not normalized_text:
             return None
 
         for needle, normalized in degree_map.items():
             if normalized_text == needle:
                 return normalized
+
+        degree_phrase_map = {
+            "master degree": "master",
+            "masters degree": "master",
+            "master's degree": "master",
+            "bachelor degree": "bachelor",
+            "bachelors degree": "bachelor",
+            "bachelor's degree": "bachelor",
+            "phd degree": "phd",
+            "doctoral degree": "phd",
+            "doctorate degree": "phd",
+            "undergraduate degree": "bachelor",
+            "high school degree": "high_school",
+        }
+        if normalized_text in degree_phrase_map:
+            return degree_phrase_map[normalized_text]
+
         return None
 
     @classmethod

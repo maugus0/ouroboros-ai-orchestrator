@@ -483,28 +483,16 @@ class ChatService:
                             retry_of_log_id=retry_of_log_id,
                         )
 
-                    if gate["allowed"]:
-                        if target_agent == "program-discovery" and detected_intent == "program_discovery":
-                            assistant_content = await self._handle_program_discovery(
-                                user_id=user_id,
-                                chat_id=chat_id,
-                                content=content,
-                                workflow_run_id=workflow_run_id,
-                            )
-                        else:
-                            assistant_content = self._build_intent_ready_response(
-                                detected_intent,
-                                content,
-                                gate,
-                            )
-                    else:
-                        assistant_content = self._build_profile_gate_response(
-                            _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
-                            applied_fields=_as_string_list((collected_from_chat or {}).get("applied_fields")),
-                            pending_clarification_fields=_as_string_list(
-                                (collected_from_chat or {}).get("pending_clarification_fields")
-                            ),
-                        )
+                    assistant_content, gate = await self._resolve_assistant_content(
+                        gate=gate,
+                        collected_from_chat=collected_from_chat,
+                        detected_intent=detected_intent,
+                        target_agent=target_agent,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        content=content,
+                        workflow_run_id=workflow_run_id,
+                    )
 
                     self._set_cached_response(
                         cache_key,
@@ -936,6 +924,129 @@ class ChatService:
         except (aiomysql.Error, RuntimeError, ValueError, TypeError) as exc:  # pragma: no cover
             logger.warning("agent_call_log_lookup_failed", user_id=user_id, chat_id=chat_id, error=str(exc))
             return None
+
+    async def _has_recent_profile_gate_reminder(self, chat_id: str) -> bool:
+        """Check if user was already reminded about incomplete profile in this chat.
+
+        Returns True if there's a recent assistant message with profile gate denial,
+        indicating the user has already been told about missing profile fields.
+        """
+        try:
+            recent = await self.message_repo.list_by_chat(chat_id=chat_id, limit=10, order="desc")
+        except (aiomysql.Error, RuntimeError, ValueError, TypeError) as exc:
+            logger.warning("profile_gate_reminder_lookup_failed", chat_id=chat_id, error=str(exc))
+            return False
+
+        if not isinstance(recent, list):
+            return False
+
+        for message in recent:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").lower() != "assistant":
+                continue
+
+            metadata = message.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+
+            profile_gate = metadata.get("profile_gate")
+            if not isinstance(profile_gate, dict):
+                continue
+
+            if profile_gate.get("allowed") is False:
+                reason = str(profile_gate.get("reason") or "")
+                if "profile_incomplete" in reason:
+                    return True
+
+        return False
+
+    async def _resolve_assistant_content(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        gate: dict[str, Any],
+        collected_from_chat: Optional[dict[str, Any]],
+        detected_intent: str,
+        target_agent: Optional[str],
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Generate assistant content based on profile gate status and intent.
+
+        If gate is allowed, generate appropriate response for the intent.
+        If gate is denied but user was already reminded, allow bypass for domain queries.
+        Otherwise, return profile completion guidance.
+
+        Returns (assistant_content, updated_gate).
+        """
+        if gate["allowed"]:
+            response = await self._generate_intent_response(
+                detected_intent=detected_intent,
+                target_agent=target_agent,
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                gate=gate,
+            )
+            return response, gate
+
+        applied_fields = _as_string_list((collected_from_chat or {}).get("applied_fields"))
+        no_fields_extracted = not applied_fields
+        is_domain_query = detected_intent not in {"profile_completion", "out_of_scope"}
+        was_already_reminded = await self._has_recent_profile_gate_reminder(chat_id)
+
+        if no_fields_extracted and is_domain_query and was_already_reminded:
+            logger.info(
+                "profile_gate_bypass_after_reminder",
+                user_id=user_id,
+                chat_id=chat_id,
+                detected_intent=detected_intent,
+                target_agent=target_agent,
+            )
+            updated_gate = {**gate, "allowed": True, "reason": "bypass_after_reminder"}
+            response = await self._generate_intent_response(
+                detected_intent=detected_intent,
+                target_agent=target_agent,
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                gate=updated_gate,
+            )
+            return response, updated_gate
+
+        response = self._build_profile_gate_response(
+            _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
+            applied_fields=applied_fields,
+            pending_clarification_fields=_as_string_list(
+                (collected_from_chat or {}).get("pending_clarification_fields")
+            ),
+        )
+        return response, gate
+
+    async def _generate_intent_response(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        detected_intent: str,
+        target_agent: Optional[str],
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        gate: dict[str, Any],
+    ) -> str:
+        """Generate response for allowed intent - either PDA call or static response."""
+        if target_agent == "program-discovery" and detected_intent == "program_discovery":
+            return await self._handle_program_discovery(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+            )
+        return self._build_intent_ready_response(detected_intent, content, gate)
 
     async def _get_latest_assistant_message(self, chat_id: str) -> Optional[dict[str, Any]]:
         """Fetch the latest assistant turn for clarification-aware intent handling."""

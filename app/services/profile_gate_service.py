@@ -930,6 +930,38 @@ class ProfileGateService:
         if lowered.startswith(blocked_prefixes):
             return False
 
+        non_academic_descriptors = {
+            "budget-friendly",
+            "budget friendly",
+            "affordable",
+            "cheap",
+            "expensive",
+            "top",
+            "best",
+            "worst",
+            "good",
+            "bad",
+            "ranked",
+            "ranking",
+            "prestigious",
+            "elite",
+            "famous",
+            "popular",
+            "new",
+            "old",
+            "large",
+            "small",
+            "online",
+            "remote",
+            "nearby",
+            "local",
+            "international",
+            "global",
+            "free",
+        }
+        if lowered in non_academic_descriptors:
+            return False
+
         degree_keywords = {
             "phd",
             "doctorate",

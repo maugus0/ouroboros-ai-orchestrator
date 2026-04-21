@@ -98,13 +98,14 @@ class IntentRegistryService:
             for token in ["cv", "resume", "upload my", "transcript", "my document", "processing", "feedback"]
         ):
             return "profile_completion"
-        if any(token in lowered for token in ["profile", "my gpa", "my degree", "my background", "update my"]):
-            return "profile_completion"
 
         if self._is_program_discovery_query(lowered):
             if self._has_application_keywords(lowered) and self._has_university_mention(lowered):
                 return "apply_to_named_school"
             return "program_discovery"
+
+        if any(token in lowered for token in ["profile", "my gpa", "my degree", "my background", "update my"]):
+            return "profile_completion"
 
         if any(token in lowered for token in ["scholarship", "funding", "grant", "financial aid"]):
             return "scholarship_search"

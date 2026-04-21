@@ -346,6 +346,115 @@ class ProfileGateService:
             self._set_cached_readiness(cache_key, result)
         return result
 
+    async def get_profile_clarifications(
+        self,
+        user_id: str,
+        profile_id: str,
+        *,
+        chat_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+        retry_of_log_id: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        """Fetch the latest clarification queue and ReAct trace for a profile."""
+        started_at = time.perf_counter()
+        try:
+            payload = await self.student_profile_client.get_profile_clarifications(
+                profile_id=profile_id,
+                user_id=user_id,
+            )
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="get_profile_clarifications",
+                request_method="GET",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="success",
+                response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            if not isinstance(payload, dict):
+                return None
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return data if isinstance(data, dict) else None
+        except AgentClientError as exc:
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="get_profile_clarifications",
+                request_method="GET",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            logger.warning("profile_clarifications_fetch_failed", user_id=user_id, profile_id=profile_id, error=str(exc))
+            return None
+
+    async def submit_profile_clarification_answers(
+        self,
+        user_id: str,
+        profile_id: str,
+        answers: list[dict[str, Any]],
+        *,
+        chat_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+        retry_of_log_id: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        """Submit chat replies to the active ReAct clarification queue."""
+        started_at = time.perf_counter()
+        try:
+            payload = await self.student_profile_client.submit_profile_clarifications(
+                profile_id=profile_id,
+                user_id=user_id,
+                answers=answers,
+            )
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="submit_profile_clarifications",
+                request_method="POST",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="success",
+                request_payload={"answers": answers},
+                response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            if not isinstance(payload, dict):
+                return None
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return data if isinstance(data, dict) else None
+        except AgentClientError as exc:
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="submit_profile_clarifications",
+                request_method="POST",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload={"answers": answers},
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            logger.warning(
+                "profile_clarification_submit_failed",
+                user_id=user_id,
+                profile_id=profile_id,
+                error=str(exc),
+            )
+            return None
+
     @staticmethod
     def _extract_readiness_payload(payload: Any) -> Any:
         data = payload.get("data") if isinstance(payload, dict) else None

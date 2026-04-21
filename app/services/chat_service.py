@@ -410,6 +410,7 @@ class ChatService:
             latest_assistant_message = await self._get_latest_assistant_message(chat_id)
             detected_intent = self._maybe_override_intent_for_clarification_reply(
                 detected_intent,
+                content,
                 latest_assistant_message,
             )
             intent_policy = self.intent_registry_service.get_policy(detected_intent)
@@ -489,6 +490,15 @@ class ChatService:
                         chat_id=chat_id,
                         content=content,
                         workflow_run_id=workflow_run_id,
+                    )
+
+                    active_profile_slot = self._build_active_profile_slot(
+                        clarification_field=clarification_field,
+                        missing_fields=_as_string_list(
+                            gate.get("missing_required_fields") or gate.get("missing_fields") or []
+                        ),
+                        clarification_question=clarification_question,
+                        assistant_content=assistant_content,
                     )
 
                     self._set_cached_response(
@@ -1229,6 +1239,7 @@ class ChatService:
     @staticmethod
     def _maybe_override_intent_for_clarification_reply(
         detected_intent: str,
+        content: str,
         latest_assistant_message: Optional[dict[str, Any]],
     ) -> str:
         """Keep short clarification replies in profile-completion flow.
@@ -1237,7 +1248,7 @@ class ChatService:
         or unavailable-agent), ambiguous short replies like "yes" should continue
         the profile_completion path instead of boundary routing.
         """
-        if detected_intent != "out_of_scope" or not isinstance(latest_assistant_message, dict):
+        if not isinstance(latest_assistant_message, dict):
             return detected_intent
 
         metadata = latest_assistant_message.get("metadata")
@@ -1252,7 +1263,12 @@ class ChatService:
         if reason in {"intent_out_of_scope", "intent_agent_unavailable"}:
             return detected_intent
 
-        if profile_gate.get("allowed") is False:
+        # While profile completion is still blocking, prefer profile intent for
+        # short/non-explicit follow-up answers (for example, slot answers like
+        # "Computer Science") so they don't get routed to domain agents.
+        if profile_gate.get("allowed") is False and not ChatService._is_explicit_intent_request(
+            content, detected_intent
+        ):
             return "profile_completion"
 
         return detected_intent

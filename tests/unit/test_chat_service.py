@@ -901,6 +901,80 @@ async def test_send_message_out_of_scope_is_overridden_during_profile_clarificat
 
 
 @pytest.mark.asyncio
+async def test_send_message_program_like_slot_answer_stays_in_profile_completion(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["intended_field_of_study"],
+            "missing_required_fields": ["intended_field_of_study"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "completed": False,
+            "missing_fields": ["target_study_country"],
+            "missing_required_fields": ["target_study_country"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {
+        "applied_fields": ["intended_field_of_study"],
+    }
+    mock_profile_gate_service.persist_profile_updates_from_chat.return_value = None
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "clarification_queue": [],
+    }
+    mock_profile_gate_service.submit_profile_clarification_answers.return_value = None
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = [
+        {
+            "id": "assistant-prev-1",
+            "role": "assistant",
+            "content": "Great, I saved your GPA and GPA scale. Next, please share your intended field of study.",
+            "metadata": {
+                "profile_gate": {
+                    "allowed": False,
+                    "reason": "profile_incomplete_for_intent",
+                }
+            },
+        }
+    ]
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Computer Science",
+    )
+
+    evaluate_kwargs = mock_profile_gate_service.evaluate_gate.call_args.kwargs
+    assert evaluate_kwargs["intent"] == "profile_completion"
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["metadata"]["intent"] == "profile_completion"
+    assert "Great, I saved your intended field of study." in assistant_kwargs["content"]
+    assert "Next, please share your preferred study country." in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
 async def test_send_message_uses_clarification_question_from_student_profile(
     chat_service,
     mock_chat_repo,

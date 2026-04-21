@@ -7,6 +7,8 @@ from fastapi.openapi.models import Example
 
 from app.middleware.auth_middleware import get_current_user_id
 from app.models.chat import (
+    AssistantNoticeRequest,
+    AssistantNoticeResponse,
     ChatResponse,
     CreateChatRequest,
     PaginatedChatsResponse,
@@ -16,6 +18,7 @@ from app.models.chat import (
     UpdateChatRequest,
 )
 from app.services.chat_service import ChatService
+from app.services.profile_gate_service import ProfileGateService
 
 router = APIRouter(prefix="/api/v1/chats", tags=["Chats"])
 
@@ -217,7 +220,7 @@ _PAGINATED_MESSAGES_RESPONSE_EXAMPLE = {
 
 # ── Service Instance ─────────────────────────────────────────────────────────
 
-chat_service = ChatService()
+chat_service = ChatService(profile_gate_service=ProfileGateService())
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
@@ -421,6 +424,31 @@ async def send_message(
         user_id=user_id,
         chat_id=chat_id,
         content=body.content,
+    )
+
+
+@router.post(
+    "/{chat_id}/assistant-notice",
+    response_model=AssistantNoticeResponse,
+    summary="Post assistant notice",
+    responses={
+        200: {"description": "Assistant notice persisted"},
+        401: {"description": "Missing or invalid Bearer token"},
+        404: {"description": "Chat not found or belongs to another user"},
+        422: {"description": "Validation error (content empty or too long)"},
+    },
+)
+async def post_assistant_notice(
+    chat_id: str = Path(..., description="Chat UUID"),
+    body: AssistantNoticeRequest = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Persist an assistant-authored system notice in the chat timeline."""
+    return await chat_service.post_assistant_notice(
+        user_id=user_id,
+        chat_id=chat_id,
+        content=body.content,
+        metadata=body.metadata,
     )
 
 

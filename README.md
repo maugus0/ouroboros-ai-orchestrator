@@ -8,8 +8,11 @@ Central coordination service for the **Ouroboros AI** scholarship discovery plat
 
 - [Overview](#overview)
 - [Architecture](#architecture)
+- [Why Internal Bearer Tokens (Not X_SERVICE_TOKEN)](#why-internal-bearer-tokens-not-x_service_token)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+- [Token Generation and API Testing](#token-generation-and-api-testing)
+- [Workflow State Machines](#workflow-state-machines)
 - [Configuration](#configuration)
 - [Database Schema](#database-schema)
 - [API Endpoints](#api-endpoints)
@@ -102,33 +105,48 @@ The Orchestrator Service is the **central nervous system** of the Ouroboros AI p
       └─────────────────┘       └─────────────────┘
 ```
 
+### Why Internal Bearer Tokens (Not X_SERVICE_TOKEN)
+
+`X_SERVICE_TOKEN` is a shared secret model. It authenticates only the caller service, not the end-user context.
+
+The internal bearer-token model is better because it is:
+
+1. **Identity-preserving**: includes `sub` (user id), `sid`, and `trace_id`, so downstream services can enforce user-scoped logic directly.
+2. **Audience-bound**: `aud` is specific per target service; a token for one service cannot be reused against another.
+3. **Short-lived**: small TTL reduces replay window and blast radius.
+4. **Rotation-friendly**: `kid` + JWKS supports overlap and safe cutover.
+5. **Auditable**: claims and `jti` pair naturally with `agent_call_logs` for traceable call chains.
+6. **Zero shared static secret at runtime path**: avoids one leaked header unlocking all internal services.
+
+In short: this design moves from static shared-secret trust to scoped, verifiable, and time-bounded trust.
+
 ### Authentication Strategy
 
-| Concern | Approach |
-|---------|----------|
-| Registration | Phone number + username + first/last name + password (OTP verification required) |
-| Login | Phone number **or** username + password |
-| Password storage | **bcrypt** (cost factor 12) |
-| Token signing | **RS256** (RSA private key signs, public key verifies) |
-| Access token | 15 min TTL, claims: `{sub, token_type, username, phone, sid}` |
-| Refresh token | 7 day TTL, SHA-256 hashed in DB, rotation on use |
-| Phone verification | Twilio OTP (6-digit, 5 min expiry, max 3 attempts) |
-| Session tracking | `auth_sessions` table with `last_active_at`, `revoked_at` for duration metrics |
+| Concern            | Approach                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------ |
+| Registration       | Phone number + username + first/last name + password (OTP verification required)           |
+| Login              | Phone number **or** username + password                                                    |
+| Password storage   | **bcrypt** (cost factor 12)                                                                |
+| Token signing      | **RS256** (RSA private key signs, public key verifies)                                     |
+| Access token       | 15 min TTL, claims: `{sub, token_type, username, phone, sid}`                              |
+| Refresh token      | 7 day TTL, SHA-256 hashed in DB, rotation on use                                           |
+| Phone verification | Twilio OTP (6-digit, 5 min expiry, max 3 attempts)                                         |
+| Session tracking   | `auth_sessions` table with `last_active_at`, `revoked_at` for duration metrics             |
 | Profile completion | First login: gender, email, about me, profession, interest (jobs/startups/research/degree) |
-| MFA (optional) | When enabled, login requires a second SMS OTP step (max 10/day) before tokens are issued |
-| Forgot password | OTP to phone → verify → new password. Limited to once per week |
-| Reset password | Authenticated change (current + new password). Limited to once per month |
+| MFA (optional)     | When enabled, login requires a second SMS OTP step (max 10/day) before tokens are issued   |
+| Forgot password    | OTP to phone → verify → new password. Limited to once per week                             |
+| Reset password     | Authenticated change (current + new password). Limited to once per month                   |
 
 ---
 
 ## Prerequisites
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Python | 3.11+ | Runtime |
-| MySQL | 8.0+ | Database |
-| Twilio account | — | OTP delivery |
-| Docker | 24.0+ | Containerised deployment (optional) |
+| Tool           | Version | Purpose                             |
+| -------------- | ------- | ----------------------------------- |
+| Python         | 3.11+   | Runtime                             |
+| MySQL          | 8.0+    | Database                            |
+| Twilio account | —       | OTP delivery                        |
+| Docker         | 24.0+   | Containerised deployment (optional) |
 
 ---
 
@@ -160,6 +178,25 @@ Copy each PEM file’s full text into `.env` as a single-line value: replace rea
 JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
 ```
+
+### 2b. Generate Internal Service Token Keys
+
+```bash
+openssl genrsa -out internal_private.pem 2048
+openssl rsa -in internal_private.pem -pubout -out internal_public.pem
+```
+
+Copy the internal PEM files into `.env` as single-line escaped values, just like the user JWT keys. Keep the internal private key separate from the user auth keys.
+
+```
+INTERNAL_TOKEN_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+INTERNAL_TOKEN_ACTIVE_KID="internal-v1"
+INTERNAL_TOKEN_ENABLED=true
+INTERNAL_TOKEN_ISSUER="ouroboros-orchestrator-internal"
+INTERNAL_TOKEN_TTL_SECONDS=120
+```
+
+Then delete `internal_private.pem` and `internal_public.pem` locally.
 
 ### 3. Set Up Twilio
 
@@ -219,48 +256,153 @@ curl http://localhost:8000/health
 
 **Swagger UI**: http://localhost:8000/docs (click **Authorize** and paste a JWT access token to test protected endpoints).
 
+### Token Generation and API Testing
+
+### A. Get User Access Token (normal flow)
+
+Recommended for Swagger/Postman testing:
+
+1. Sign up and verify OTP (or use seeded user).
+2. Login and copy `access_token`.
+3. Click **Authorize** in Swagger and paste token value only.
+
+Example login call:
+
+```bash
+curl -X POST http://localhost:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"Feri","password":"Admin123@"}'
+```
+
+### B. Generate Internal Service Token (debug only)
+
+Normally the orchestrator mints this automatically for downstream calls.
+For debugging only:
+
+```bash
+python - <<'PY'
+from app.security.internal_token_issuer import InternalTokenIssuer
+
+issuer = InternalTokenIssuer()
+token = issuer.issue_service_token(
+  sub="debug-user-id",
+  sid="debug-session-id",
+  trace_id="debug-trace-id",
+  aud=issuer.resolve_audience("student-profile"),
+)
+print(token)
+PY
+```
+
+Internal JWKS endpoint (for downstream verifiers):
+
+- `GET /internal/.well-known/jwks.json`
+
+---
+
+## Workflow State Machines
+
+### Chat State
+
+```mermaid
+stateDiagram-v2
+  [*] --> OPEN
+  OPEN --> ARCHIVED: user archive action
+  ARCHIVED --> OPEN: user restore action
+  OPEN --> DELETED: soft delete
+  ARCHIVED --> DELETED: soft delete
+  DELETED --> [*]
+```
+
+Explanation:
+
+- `OPEN`: active chat lifecycle.
+- `ARCHIVED`: hidden from active list, still recoverable.
+- `DELETED`: soft-deleted lifecycle state.
+
+### Agent Execution State
+
+```mermaid
+stateDiagram-v2
+  [*] --> RECEIVED
+  RECEIVED --> PROFILE_GATE
+  PROFILE_GATE --> ROUTE_PROFILE_AGENT: profile incomplete
+  PROFILE_GATE --> ROUTE_TARGET_AGENT: profile complete
+  ROUTE_PROFILE_AGENT --> EXECUTING
+  ROUTE_TARGET_AGENT --> EXECUTING
+  EXECUTING --> SUCCESS
+  EXECUTING --> FAILED_RETRYABLE
+  FAILED_RETRYABLE --> EXECUTING: bounded retry
+  FAILED_RETRYABLE --> FAILED_TERMINAL: retries exhausted
+  FAILED_TERMINAL --> [*]
+  SUCCESS --> [*]
+```
+
+Explanation:
+
+- `PROFILE_GATE` enforces readiness before non-profile targets.
+- `ROUTE_PROFILE_AGENT` is selected when missing required profile fields.
+- `ROUTE_TARGET_AGENT` is selected only after readiness passes.
+- Retries are explicit and bounded, with failure terminal states persisted for audit.
+
 ---
 
 ## Configuration
 
 ### Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| **Database** ||||
-| `DB_HOST` | No | `localhost` | MySQL host |
-| `DB_PORT` | No | `3306` | MySQL port |
-| `DB_NAME` | No | `ouroboros_orchestrator_db` | Database name |
-| `DB_USERNAME` | No | `root` | MySQL user |
-| `DB_PASSWORD` | Yes | — | MySQL password |
-| `DB_POOL_SIZE` | No | `10` | Max connections in pool |
-| **JWT (RS256)** ||||
-| `JWT_PRIVATE_KEY` | Yes | — | RSA private key PEM (escape newlines as `\n`) |
-| `JWT_PUBLIC_KEY` | Yes | — | RSA public key PEM |
-| `JWT_ACCESS_TOKEN_EXP_SECONDS` | No | `900` | Access token TTL (15 min) |
-| `JWT_REFRESH_TOKEN_EXP_SECONDS` | No | `604800` | Refresh token TTL (7 days) |
-| `JWT_ISSUER` | No | `ouroboros.ai/auth` | Token issuer claim |
-| `JWT_AUDIENCE` | No | `ouroboros-api` | Token audience claim |
-| **Twilio** ||||
-| `TWILIO_ACCOUNT_SID` | Yes | — | Twilio Account SID |
-| `TWILIO_AUTH_TOKEN` | Yes | — | Twilio Auth Token |
-| `TWILIO_PHONE_NUMBER` | Yes | — | Twilio sender number (E.164) |
-| `TWILIO_VERIFY_SERVICE_SID` | No | — | Twilio Verify service (optional) |
-| **OTP** ||||
-| `OTP_EXPIRY_SECONDS` | No | `300` | OTP validity (5 min) |
-| `OTP_MAX_ATTEMPTS` | No | `3` | Max failed OTP attempts |
-| `OTP_COOLDOWN_SECONDS` | No | `30` | Min seconds between sends |
-| `OTP_RATE_LIMIT_MAX_REQUESTS` | No | `3` | Max OTPs per rate window |
-| `OTP_RATE_LIMIT_WINDOW_SECONDS` | No | `900` | Rate limit window (15 min) |
-| `MFA_OTP_DAILY_LIMIT` | No | `10` | Max MFA OTPs per user per day |
-| **Password Reset** ||||
-| `FORGOT_PASSWORD_COOLDOWN_DAYS` | No | `7` | Min days between forgot-password resets |
-| `RESET_PASSWORD_COOLDOWN_DAYS` | No | `30` | Min days between authenticated password changes |
-| **Application** ||||
-| `LOG_LEVEL` | No | `INFO` | Logging level |
-| `ALLOW_DB_FAILURE` | No | `false` | Skip DB on startup (tests only) |
-| `CORS_ORIGINS` | No | `http://localhost:8080,...` | Allowed origins |
-| `ALLOWED_COUNTRY_CODES` | No | `["SG","IN",...]` | Allowed phone countries (JSON array) |
+| Variable                                    | Required | Default                           | Description                                     |
+| ------------------------------------------- | -------- | --------------------------------- | ----------------------------------------------- |
+| **Database**                                |          |                                   |                                                 |
+| `DB_HOST`                                   | No       | `localhost`                       | MySQL host                                      |
+| `DB_PORT`                                   | No       | `3306`                            | MySQL port                                      |
+| `DB_NAME`                                   | No       | `ouroboros_orchestrator_db`       | Database name                                   |
+| `DB_USERNAME`                               | No       | `root`                            | MySQL user                                      |
+| `DB_PASSWORD`                               | Yes      | —                                 | MySQL password                                  |
+| `DB_POOL_SIZE`                              | No       | `10`                              | Max connections in pool                         |
+| **JWT (RS256)**                             |          |                                   |                                                 |
+| `JWT_PRIVATE_KEY`                           | Yes      | —                                 | RSA private key PEM (escape newlines as `\n`)   |
+| `JWT_PUBLIC_KEY`                            | Yes      | —                                 | RSA public key PEM                              |
+| `JWT_ACCESS_TOKEN_EXP_SECONDS`              | No       | `900`                             | Access token TTL (15 min)                       |
+| `JWT_REFRESH_TOKEN_EXP_SECONDS`             | No       | `604800`                          | Refresh token TTL (7 days)                      |
+| `JWT_ISSUER`                                | No       | `ouroboros.ai/auth`               | Token issuer claim                              |
+| `JWT_AUDIENCE`                              | No       | `ouroboros-api`                   | Token audience claim                            |
+| **Twilio**                                  |          |                                   |                                                 |
+| `TWILIO_ACCOUNT_SID`                        | Yes      | —                                 | Twilio Account SID                              |
+| `TWILIO_AUTH_TOKEN`                         | Yes      | —                                 | Twilio Auth Token                               |
+| `TWILIO_PHONE_NUMBER`                       | Yes      | —                                 | Twilio sender number (E.164)                    |
+| `TWILIO_VERIFY_SERVICE_SID`                 | No       | —                                 | Twilio Verify service (optional)                |
+| **OTP**                                     |          |                                   |                                                 |
+| `OTP_EXPIRY_SECONDS`                        | No       | `300`                             | OTP validity (5 min)                            |
+| `OTP_MAX_ATTEMPTS`                          | No       | `3`                               | Max failed OTP attempts                         |
+| `OTP_COOLDOWN_SECONDS`                      | No       | `30`                              | Min seconds between sends                       |
+| `OTP_RATE_LIMIT_MAX_REQUESTS`               | No       | `3`                               | Max OTPs per rate window                        |
+| `OTP_RATE_LIMIT_WINDOW_SECONDS`             | No       | `900`                             | Rate limit window (15 min)                      |
+| `MFA_OTP_DAILY_LIMIT`                       | No       | `10`                              | Max MFA OTPs per user per day                   |
+| **Internal Service JWT**                    |          |                                   |                                                 |
+| `INTERNAL_TOKEN_ENABLED`                    | No       | `false`                           | Enable internal bearer token issuance           |
+| `INTERNAL_TOKEN_ISSUER`                     | No       | `ouroboros-orchestrator-internal` | Issuer claim for downstream services            |
+| `INTERNAL_TOKEN_TTL_SECONDS`                | No       | `120`                             | Short-lived internal token TTL                  |
+| `INTERNAL_TOKEN_SIGNING_ALGORITHM`          | No       | `RS256`                           | Signing algorithm for internal JWTs             |
+| `INTERNAL_TOKEN_ACTIVE_KID`                 | No       | `internal-v1`                     | Active key id for rotation                      |
+| `INTERNAL_TOKEN_PRIVATE_KEY`                | Yes      | —                                 | Private key PEM for internal JWTs               |
+| `INTERNAL_TOKEN_PUBLIC_KEYS`                | No       | —                                 | Public keys for JWKS publication/verification   |
+| `INTERNAL_TOKEN_AUDIENCE_MAP`               | No       | `{...}`                           | Target-service audience mapping                 |
+| `INTERNAL_TOKEN_JWKS_CACHE_MAX_AGE_SECONDS` | No       | `60`                              | JWKS cache TTL for downstream verifiers         |
+| **Downstream Service URLs**                 |          |                                   |                                                 |
+| `STUDENT_PROFILE_SERVICE_URL`               | No       | —                                 | Student profile service base URL                |
+| `PROGRAM_DISCOVERY_SERVICE_URL`             | No       | —                                 | Program discovery service base URL              |
+| `SCHOLARSHIP_DISCOVERY_SERVICE_URL`         | No       | —                                 | Scholarship discovery service base URL          |
+| `ELIGIBILITY_SERVICE_URL`                   | No       | —                                 | Eligibility engine base URL                     |
+| `APPLICATION_SUPPORT_SERVICE_URL`           | No       | —                                 | Application support service base URL            |
+| **Password Reset**                          |          |                                   |                                                 |
+| `FORGOT_PASSWORD_COOLDOWN_DAYS`             | No       | `7`                               | Min days between forgot-password resets         |
+| `RESET_PASSWORD_COOLDOWN_DAYS`              | No       | `30`                              | Min days between authenticated password changes |
+| **Application**                             |          |                                   |                                                 |
+| `LOG_LEVEL`                                 | No       | `INFO`                            | Logging level                                   |
+| `ALLOW_DB_FAILURE`                          | No       | `false`                           | Skip DB on startup (tests only)                 |
+| `CORS_ORIGINS`                              | No       | `http://localhost:8080,...`       | Allowed origins                                 |
+| `ALLOWED_COUNTRY_CODES`                     | No       | `["SG","IN",...]`                 | Allowed phone countries (JSON array)            |
 
 Docker, inter-service, and agent settings are documented in `.env.example`.
 
@@ -270,90 +412,98 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 
 ### Tables
 
-| Table | Purpose |
-|-------|---------|
-| `users` | User accounts: phone-based auth, OTP fields, profile data (first/last name, gender, email, profession, interest) |
-| `auth_sessions` | JWT session tracking — one row per login. Tracks `last_active_at` and `revoked_at` for session duration |
-| `otp_logs` | Audit trail for OTP events with context (signup/mfa/forgot_password) for per-flow rate limits |
-| `projects` | User-defined folders for organizing chats. Has name, description, color, icon, and chat_count |
-| `chats` | Chat sessions — one per conversation. Tracks title, is_starred, project_id, message_count, soft-delete via `deleted_at` |
-| `messages` | Messages within chats. Role: `user`, `assistant`, or `system`. JSON metadata for future agent routing |
+| Table           | Purpose                                                                                                                 |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `users`         | User accounts: phone-based auth, OTP fields, profile data (first/last name, gender, email, profession, interest)        |
+| `auth_sessions` | JWT session tracking — one row per login. Tracks `last_active_at` and `revoked_at` for session duration                 |
+| `otp_logs`      | Audit trail for OTP events with context (signup/mfa/forgot_password) for per-flow rate limits                           |
+| `projects`      | User-defined folders for organizing chats. Has name, description, color, icon, and chat_count                           |
+| `chats`         | Chat sessions — one per conversation. Tracks title, is_starred, project_id, message_count, soft-delete via `deleted_at` |
+| `messages`      | Messages within chats. Role: `user`, `assistant`, or `system`. JSON metadata for future agent routing                   |
 
 ### Users Table
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | VARCHAR(36) | UUID v4 primary key |
-| `username` | VARCHAR(50) | Unique, 3-20 chars |
-| `phone_number` | VARCHAR(20) | E.164 format, unique |
-| `phone_country_code` | VARCHAR(5) | ISO 3166-1 alpha-2 |
-| `phone_verified` | BOOLEAN | OTP verification status |
-| `password_hash` | TEXT | bcrypt hash |
-| `first_name` | VARCHAR(50) | Required on signup |
-| `last_name` | VARCHAR(50) | Required on signup |
-| `email` | VARCHAR(255) | Optional, set during profile completion |
-| `gender` | ENUM | `male`, `female`, `other`, or `prefer_not_to_say` |
-| `about_me` | TEXT | Short bio |
-| `profession` | VARCHAR(100) | User's profession |
-| `interest` | ENUM | `jobs`, `startups`, `research`, or `degree` |
-| `profile_completed` | BOOLEAN | `true` only when gender, email, about_me, profession, and interest are all set |
-| `mfa_enabled` | BOOLEAN | When `true`, login requires additional SMS OTP verification |
-| `password_changed_at` | DATETIME | Last password change (enforces cooldown limits) |
+| Column                | Type         | Description                                                                    |
+| --------------------- | ------------ | ------------------------------------------------------------------------------ |
+| `id`                  | VARCHAR(36)  | UUID v4 primary key                                                            |
+| `username`            | VARCHAR(50)  | Unique, 3-20 chars                                                             |
+| `phone_number`        | VARCHAR(20)  | E.164 format, unique                                                           |
+| `phone_country_code`  | VARCHAR(5)   | ISO 3166-1 alpha-2                                                             |
+| `phone_verified`      | BOOLEAN      | OTP verification status                                                        |
+| `password_hash`       | TEXT         | bcrypt hash                                                                    |
+| `first_name`          | VARCHAR(50)  | Required on signup                                                             |
+| `last_name`           | VARCHAR(50)  | Required on signup                                                             |
+| `email`               | VARCHAR(255) | Optional, set during profile completion                                        |
+| `gender`              | ENUM         | `male`, `female`, `other`, or `prefer_not_to_say`                              |
+| `about_me`            | TEXT         | Short bio                                                                      |
+| `profession`          | VARCHAR(100) | User's profession                                                              |
+| `interest`            | ENUM         | `jobs`, `startups`, `research`, or `degree`                                    |
+| `profile_completed`   | BOOLEAN      | `true` only when gender, email, about_me, profession, and interest are all set |
+| `mfa_enabled`         | BOOLEAN      | When `true`, login requires additional SMS OTP verification                    |
+| `password_changed_at` | DATETIME     | Last password change (enforces cooldown limits)                                |
 
 ### Auth Sessions Table
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | VARCHAR(36) | Session UUID (also used as `sid` in JWT claims) |
-| `user_id` | VARCHAR(36) | FK → users.id (CASCADE delete) |
-| `token_hash` | VARCHAR(255) | SHA-256 hash of current refresh token JTI |
-| `expires_at` | DATETIME | Session expiry (UTC) |
-| `is_revoked` | BOOLEAN | Set to `true` on logout |
-| `revoked_at` | DATETIME | When the session was revoked |
-| `last_active_at` | DATETIME | Updated on each token refresh |
-| `user_agent` | TEXT | Client user-agent at login |
-| `ip_address` | VARCHAR(50) | Client IP at session creation |
+| Column           | Type         | Description                                     |
+| ---------------- | ------------ | ----------------------------------------------- |
+| `id`             | VARCHAR(36)  | Session UUID (also used as `sid` in JWT claims) |
+| `user_id`        | VARCHAR(36)  | FK → users.id (CASCADE delete)                  |
+| `token_hash`     | VARCHAR(255) | SHA-256 hash of current refresh token JTI       |
+| `expires_at`     | DATETIME     | Session expiry (UTC)                            |
+| `is_revoked`     | BOOLEAN      | Set to `true` on logout                         |
+| `revoked_at`     | DATETIME     | When the session was revoked                    |
+| `last_active_at` | DATETIME     | Updated on each token refresh                   |
+| `user_agent`     | TEXT         | Client user-agent at login                      |
+| `ip_address`     | VARCHAR(50)  | Client IP at session creation                   |
 
 ### Projects Table
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | VARCHAR(36) | UUID v4 primary key |
-| `user_id` | VARCHAR(36) | FK → users.id (CASCADE delete) |
-| `name` | VARCHAR(100) | Project name (required) |
-| `description` | TEXT | Optional project description |
-| `color` | VARCHAR(7) | Hex color code for UI (e.g., `#3B82F6`) |
-| `icon` | VARCHAR(50) | Icon identifier for UI (e.g., `folder`, `briefcase`) |
-| `chat_count` | INT | Denormalized count of chats in this project |
-| `created_at` | DATETIME | Project creation time (UTC) |
-| `updated_at` | DATETIME | Last activity (UTC) |
-| `deleted_at` | DATETIME | Soft delete marker |
+| Column        | Type         | Description                                          |
+| ------------- | ------------ | ---------------------------------------------------- |
+| `id`          | VARCHAR(36)  | UUID v4 primary key                                  |
+| `user_id`     | VARCHAR(36)  | FK → users.id (CASCADE delete)                       |
+| `name`        | VARCHAR(100) | Project name (required)                              |
+| `description` | TEXT         | Optional project description                         |
+| `color`       | VARCHAR(7)   | Hex color code for UI (e.g., `#3B82F6`)              |
+| `icon`        | VARCHAR(50)  | Icon identifier for UI (e.g., `folder`, `briefcase`) |
+| `chat_count`  | INT          | Denormalized count of chats in this project          |
+| `created_at`  | DATETIME     | Project creation time (UTC)                          |
+| `updated_at`  | DATETIME     | Last activity (UTC)                                  |
+| `deleted_at`  | DATETIME     | Soft delete marker                                   |
 
 ### Chats Table
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | VARCHAR(36) | UUID v4 primary key |
-| `user_id` | VARCHAR(36) | FK → users.id (CASCADE delete) |
-| `title` | VARCHAR(255) | Auto-generated from first message or user-set |
-| `status` | ENUM | `active` or `archived` |
-| `is_starred` | BOOLEAN | User-marked as favorite (default `false`) |
-| `project_id` | VARCHAR(36) | FK → projects.id (SET NULL on project delete) |
-| `message_count` | INT | Denormalized count for list view performance |
-| `created_at` | DATETIME | Chat creation time (UTC) |
-| `updated_at` | DATETIME | Last activity (UTC) |
-| `deleted_at` | DATETIME | Soft delete marker |
+| Column          | Type         | Description                                   |
+| --------------- | ------------ | --------------------------------------------- |
+| `id`            | VARCHAR(36)  | UUID v4 primary key                           |
+| `user_id`       | VARCHAR(36)  | FK → users.id (CASCADE delete)                |
+| `title`         | VARCHAR(255) | Auto-generated from first message or user-set |
+| `status`        | ENUM         | `active` or `archived`                        |
+| `is_starred`    | BOOLEAN      | User-marked as favorite (default `false`)     |
+| `project_id`    | VARCHAR(36)  | FK → projects.id (SET NULL on project delete) |
+| `message_count` | INT          | Denormalized count for list view performance  |
+| `created_at`    | DATETIME     | Chat creation time (UTC)                      |
+| `updated_at`    | DATETIME     | Last activity (UTC)                           |
+| `deleted_at`    | DATETIME     | Soft delete marker                            |
 
 ### Messages Table
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | VARCHAR(36) | UUID v4 primary key |
-| `chat_id` | VARCHAR(36) | FK → chats.id (CASCADE delete) |
-| `role` | ENUM | `user`, `assistant`, or `system` |
-| `content` | TEXT | Message content |
-| `metadata` | JSON | Future: agent_ids, routing_decision, token_count, latency_ms |
-| `created_at` | DATETIME | Message timestamp (UTC) |
+| Column       | Type        | Description                                                  |
+| ------------ | ----------- | ------------------------------------------------------------ |
+| `id`         | VARCHAR(36) | UUID v4 primary key                                          |
+| `chat_id`    | VARCHAR(36) | FK → chats.id (CASCADE delete)                               |
+| `role`       | ENUM        | `user`, `assistant`, or `system`                             |
+| `content`    | TEXT        | Message content                                              |
+| `metadata`   | JSON        | Future: agent_ids, routing_decision, token_count, latency_ms |
+| `created_at` | DATETIME    | Message timestamp (UTC)                                      |
+
+### Workflow and Audit Tables
+
+| Table              | Purpose                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `workflow_runs`    | Per-run orchestration metadata for profile-readiness and agent execution               |
+| `workflow_context` | Optional per-chat or per-request cached workflow state                                 |
+| `agent_call_logs`  | Downstream call attempts, responses, errors, trace ids, session ids, and retry linkage |
 
 ### Migrations
 
@@ -373,52 +523,66 @@ All migrations are **idempotent** using `CREATE TABLE IF NOT EXISTS` — safe to
 
 ### Authentication (`/auth`)
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/auth/signup` | Public | Register with phone, username, first/last name + password; sends OTP |
-| POST | `/auth/verify-otp` | Public | Verify OTP; returns JWT tokens |
-| POST | `/auth/resend-otp` | Public | Resend OTP (rate-limited) |
-| POST | `/auth/login` | Public | Phone or username + password; returns tokens (200) or MFA challenge (202) |
-| POST | `/auth/refresh` | Public | Rotate refresh token → new token pair |
-| POST | `/auth/logout` | Bearer | Revoke current session |
-| GET | `/auth/me` | Bearer | Current user profile |
-| PATCH | `/auth/profile` | Bearer | Update profile (gender, email, about me, profession, interest) |
-| GET | `/auth/profile-status` | Bearer | Check profile/phone verification status |
-| GET | `/auth/sessions` | Bearer | List active sessions (or all with `?active_only=false`) |
-| POST | `/auth/mfa/toggle` | Bearer | Enable or disable MFA for the current user |
-| POST | `/auth/mfa/verify` | Public | Verify MFA OTP to complete login (after 202 challenge) |
-| POST | `/auth/forgot-password` | Public | Request OTP for password reset (1/week limit) |
-| POST | `/auth/forgot-password/verify` | Public | Verify OTP and set new password |
-| POST | `/auth/reset-password` | Bearer | Change password with current password (1/month limit) |
+| Method | Path                           | Auth   | Description                                                               |
+| ------ | ------------------------------ | ------ | ------------------------------------------------------------------------- |
+| POST   | `/auth/signup`                 | Public | Register with phone, username, first/last name + password; sends OTP      |
+| POST   | `/auth/verify-otp`             | Public | Verify OTP; returns JWT tokens                                            |
+| POST   | `/auth/resend-otp`             | Public | Resend OTP (rate-limited)                                                 |
+| POST   | `/auth/login`                  | Public | Phone or username + password; returns tokens (200) or MFA challenge (202) |
+| POST   | `/auth/refresh`                | Public | Rotate refresh token → new token pair                                     |
+| POST   | `/auth/logout`                 | Bearer | Revoke current session                                                    |
+| GET    | `/auth/me`                     | Bearer | Current user profile                                                      |
+| PATCH  | `/auth/profile`                | Bearer | Update profile (gender, email, about me, profession, interest)            |
+| GET    | `/auth/profile-status`         | Bearer | Check profile/phone verification status                                   |
+| GET    | `/auth/sessions`               | Bearer | List active sessions (or all with `?active_only=false`)                   |
+| POST   | `/auth/mfa/toggle`             | Bearer | Enable or disable MFA for the current user                                |
+| POST   | `/auth/mfa/verify`             | Public | Verify MFA OTP to complete login (after 202 challenge)                    |
+| POST   | `/auth/forgot-password`        | Public | Request OTP for password reset (1/week limit)                             |
+| POST   | `/auth/forgot-password/verify` | Public | Verify OTP and set new password                                           |
+| POST   | `/auth/reset-password`         | Bearer | Change password with current password (1/month limit)                     |
 
 ### Chat Sessions (`/api/v1/chats`)
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/v1/chats` | Bearer | Create new chat (optionally with message and/or project) |
-| GET | `/api/v1/chats` | Bearer | List user's chats (paginated, filterable by starred/project) |
-| GET | `/api/v1/chats/{id}` | Bearer | Get single chat by ID |
-| PATCH | `/api/v1/chats/{id}` | Bearer | Update chat (title, is_starred, project_id) |
-| DELETE | `/api/v1/chats/{id}` | Bearer | Soft-delete chat |
-| POST | `/api/v1/chats/{id}/messages` | Bearer | Send message and get assistant response |
-| GET | `/api/v1/chats/{id}/messages` | Bearer | Get message history (paginated) |
+| Method | Path                          | Auth   | Description                                                  |
+| ------ | ----------------------------- | ------ | ------------------------------------------------------------ |
+| POST   | `/api/v1/chats`               | Bearer | Create new chat (optionally with message and/or project)     |
+| GET    | `/api/v1/chats`               | Bearer | List user's chats (paginated, filterable by starred/project) |
+| GET    | `/api/v1/chats/{id}`          | Bearer | Get single chat by ID                                        |
+| PATCH  | `/api/v1/chats/{id}`          | Bearer | Update chat (title, is_starred, project_id)                  |
+| DELETE | `/api/v1/chats/{id}`          | Bearer | Soft-delete chat                                             |
+| POST   | `/api/v1/chats/{id}/messages` | Bearer | Send message and get assistant response                      |
+| GET    | `/api/v1/chats/{id}/messages` | Bearer | Get message history (paginated)                              |
 
 ### Projects (`/api/v1/projects`)
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/v1/projects` | Bearer | Create new project |
-| GET | `/api/v1/projects` | Bearer | List user's projects (paginated) |
-| GET | `/api/v1/projects/{id}` | Bearer | Get single project by ID |
-| PATCH | `/api/v1/projects/{id}` | Bearer | Update project (name, description, color, icon) |
-| DELETE | `/api/v1/projects/{id}` | Bearer | Soft-delete project (chats remain, unassigned) |
+| Method | Path                    | Auth   | Description                                     |
+| ------ | ----------------------- | ------ | ----------------------------------------------- |
+| POST   | `/api/v1/projects`      | Bearer | Create new project                              |
+| GET    | `/api/v1/projects`      | Bearer | List user's projects (paginated)                |
+| GET    | `/api/v1/projects/{id}` | Bearer | Get single project by ID                        |
+| PATCH  | `/api/v1/projects/{id}` | Bearer | Update project (name, description, color, icon) |
+| DELETE | `/api/v1/projects/{id}` | Bearer | Soft-delete project (chats remain, unassigned)  |
 
 ### Health
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/` | Public | Root health check (message, version, status) |
-| GET | `/health` | Public | Detailed health with database connectivity check |
+| Method | Path      | Auth   | Description                                      |
+| ------ | --------- | ------ | ------------------------------------------------ |
+| GET    | `/`       | Public | Root health check (message, version, status)     |
+| GET    | `/health` | Public | Detailed health with database connectivity check |
+
+### Workflows
+
+| Method | Path                                                      | Auth   | Description                           |
+| ------ | --------------------------------------------------------- | ------ | ------------------------------------- |
+| GET    | `/api/v1/workflows/users/me/profile-readiness`            | Bearer | Read current profile readiness state  |
+| GET    | `/api/v1/workflows/chats/{chat_id}/status`                | Bearer | Read orchestration status for a chat  |
+| POST   | `/api/v1/workflows/chats/{chat_id}/retry-last-agent-call` | Bearer | Retry the last failed downstream call |
+
+### Internal
+
+| Method | Path                              | Auth   | Description                                  |
+| ------ | --------------------------------- | ------ | -------------------------------------------- |
+| GET    | `/internal/.well-known/jwks.json` | Public | Public keys for internal bearer verification |
 
 ### API Documentation
 
@@ -549,6 +713,7 @@ Body: { "title": "New Title", "is_starred": true, "project_id": "proj-uuid" }  #
 ### Chat Response Types
 
 **ChatResponse** (returned by create, get, update):
+
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -563,6 +728,7 @@ Body: { "title": "New Title", "is_starred": true, "project_id": "proj-uuid" }  #
 ```
 
 **SendMessageResponse** (returned by send message):
+
 ```json
 {
   "user_message": {
@@ -595,6 +761,7 @@ Body: { "title": "New Title", "is_starred": true, "project_id": "proj-uuid" }  #
 ```
 
 **PaginatedChatsResponse** (returned by list chats):
+
 ```json
 {
   "chats": [
@@ -637,6 +804,7 @@ Body: { "title": "New Title", "is_starred": true, "project_id": "proj-uuid" }  #
 ### Project Response Types
 
 **ProjectResponse** (returned by create, get, update):
+
 ```json
 {
   "id": "proj-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -651,6 +819,7 @@ Body: { "title": "New Title", "is_starred": true, "project_id": "proj-uuid" }  #
 ```
 
 **PaginatedProjectsResponse** (returned by list projects):
+
 ```json
 {
   "projects": [
@@ -748,13 +917,13 @@ open htmlcov/index.html
 
 The seed script creates five OuroborosAI team members for local testing:
 
-| Username | Name | Phone | Email |
-|----------|------|-------|-------|
-| Maugus | Ahan Jaiswal | +91-9818772178 | ahanjaiswal12@gmail.com |
-| NPT | Phu Truong Nguyen | +65-81234501 | phu@gmail.com |
-| Feri | Feri Setiawan | +65-81234502 | feri@gmail.com |
-| Stella | Xingyuan Liu | +65-81234503 | xingyuan@gmail.com |
-| Lantya | Lanting Zhao | +65-81234504 | lanting@gmail.com |
+| Username | Name              | Phone          | Email                   |
+| -------- | ----------------- | -------------- | ----------------------- |
+| Maugus   | Ahan Jaiswal      | +91-9818772178 | ahanjaiswal12@gmail.com |
+| NPT      | Phu Truong Nguyen | +65-81234501   | phu@gmail.com           |
+| Feri     | Feri Setiawan     | +65-81234502   | feri@gmail.com          |
+| Stella   | Xingyuan Liu      | +65-81234503   | xingyuan@gmail.com      |
+| Lantya   | Lanting Zhao      | +65-81234504   | lanting@gmail.com       |
 
 All share password: `Admin123@`
 
@@ -787,15 +956,15 @@ tests/
 
 **Trigger**: Pull requests to `main` or `develop`
 
-| Stage | Description |
-|-------|-------------|
-| **Format** | Black + isort validation |
-| **Lint** | flake8 + pylint |
-| **Unit Tests** | pytest with JUnit XML output |
-| **Type Check** | mypy static analysis |
+| Stage              | Description                     |
+| ------------------ | ------------------------------- |
+| **Format**         | Black + isort validation        |
+| **Lint**           | flake8 + pylint                 |
+| **Unit Tests**     | pytest with JUnit XML output    |
+| **Type Check**     | mypy static analysis            |
 | **Security Audit** | Bandit static security analysis |
-| **Docker Build** | Verify image builds |
-| **Summary** | Markdown table of results |
+| **Docker Build**   | Verify image builds             |
+| **Summary**        | Markdown table of results       |
 
 ---
 
@@ -896,6 +1065,8 @@ ouroboros-ai-orchestrator/
 └── README.md
 ```
 
+Additional workflow and token modules live in `app/clients/`, `app/security/`, and the workflow docs at the repo root.
+
 ### Why `app/core/`?
 
 The orchestrator uses async I/O (`aiomysql`), which means infrastructure like the database pool **must be created at startup** (via `await`) and torn down on shutdown. `app/core/` holds these lifecycle-bound resources — things that initialize before the app handles any requests and clean up when it stops. Stateless helpers live in `app/utils/`; data access lives in `app/repositories/`.
@@ -904,28 +1075,30 @@ The orchestrator uses async I/O (`aiomysql`), which means infrastructure like th
 
 ## Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| Can't connect to MySQL | Check MySQL is running. Verify `DB_*` in `.env`. Confirm the database exists. |
-| JWT or auth errors | Ensure `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` are set with `\n` for newlines. Regenerate with OpenSSL if needed. |
-| Twilio OTP not sending | Verify `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` in `.env`. Check Twilio console for errors. |
-| Import errors | Activate venv: `source venv/bin/activate && pip install -r requirements.txt` |
-| Port 8000 in use | Use `--port 8001` or stop the existing process. |
-| Tests fail locally | Run with `ALLOW_DB_FAILURE=true pytest tests/ -v` |
+| Issue                          | Fix                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Can't connect to MySQL         | Check MySQL is running. Verify `DB_*` in `.env`. Confirm the database exists.                                       |
+| JWT or auth errors             | Ensure `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` are set with `\n` for newlines. Regenerate with OpenSSL if needed.    |
+| Internal downstream 401 errors | Verify internal token env vars, `aud` mapping, `iss`, `kid`, and JWKS cache/public key config.                      |
+| JWKS endpoint returns 503      | Configure `INTERNAL_TOKEN_PRIVATE_KEY` and/or `INTERNAL_TOKEN_PUBLIC_KEYS`.                                         |
+| Twilio OTP not sending         | Verify `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` in `.env`. Check Twilio console for errors. |
+| Import errors                  | Activate venv: `source venv/bin/activate && pip install -r requirements.txt`                                        |
+| Port 8000 in use               | Use `--port 8001` or stop the existing process.                                                                     |
+| Tests fail locally             | Run with `ALLOW_DB_FAILURE=true pytest tests/ -v`                                                                   |
 
 ---
 
 ## Error Responses
 
-| Status | Example |
-|--------|---------|
-| **400** | `{"detail": "Invalid OTP code"}` |
-| **401** | `{"detail": "Invalid credentials"}` |
-| **403** | `{"detail": "Account is disabled"}` |
-| **404** | `{"detail": "User not found"}` |
-| **409** | `{"detail": "Phone number already registered"}` |
-| **422** | Pydantic validation errors |
-| **429** | `{"detail": "Too many OTP requests. Please try again later."}` (also MFA daily limit, password cooldowns) |
+| Status  | Example                                                                                                                            |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **400** | `{"detail": "Invalid OTP code"}`                                                                                                   |
+| **401** | `{"detail": "Invalid credentials"}`                                                                                                |
+| **403** | `{"detail": "Account is disabled"}`                                                                                                |
+| **404** | `{"detail": "User not found"}`                                                                                                     |
+| **409** | `{"detail": "Phone number already registered"}`                                                                                    |
+| **422** | Pydantic validation errors                                                                                                         |
+| **429** | `{"detail": "Too many OTP requests. Please try again later."}` (also MFA daily limit, password cooldowns)                          |
 | **500** | `{"detail": "Failed to send OTP. Please try again."}` when Twilio SMS fails (signup, resend, forgot-password, MFA login challenge) |
 
 **Note:** If signup returns **500** after Twilio fails, the user row may already exist; use **resend-otp** once SMS is working, or remove the row and sign up again during development.

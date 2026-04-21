@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.utils.profile_completion import is_profile_complete
+from app.utils.profile_completion import get_missing_profile_fields, is_profile_complete
 
 _COMPLETE = {
     "gender": "female",
@@ -35,3 +35,8 @@ _COMPLETE = {
 )
 def test_is_profile_complete(row, expected):
     assert is_profile_complete(row) is expected
+
+
+def test_get_missing_profile_fields():
+    missing = get_missing_profile_fields({"gender": "female", "email": "", "about_me": "Hi", "profession": None})
+    assert missing == ["email", "profession", "interest"]

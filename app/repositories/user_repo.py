@@ -5,11 +5,22 @@ from datetime import datetime
 from typing import Any, Optional
 
 import aiomysql
+import pymysql.err  # type: ignore[import-untyped]
 
 from app.core.logging import get_logger
 from app.utils.profile_completion import is_profile_complete
 
 logger = get_logger(__name__)
+
+
+class DuplicateFieldError(Exception):
+    """Raised when a unique field value already exists in the database."""
+
+    def __init__(self, field: str, value: str) -> None:
+        self.field = field
+        self.value = value
+        super().__init__(f"{field} '{value}' is already in use")
+
 
 _PROFILE_COLS = """
     id, username, phone_number, phone_country_code, phone_verified,
@@ -84,6 +95,22 @@ class UserRepository:
                     "SELECT 1 FROM users WHERE LOWER(username) = LOWER(%s) LIMIT 1",
                     (username,),
                 )
+                return await cur.fetchone() is not None
+
+    async def email_exists(self, email: str, exclude_user_id: Optional[str] = None) -> bool:
+        """Check if email is already in use (optionally excluding a specific user)."""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                if exclude_user_id:
+                    await cur.execute(
+                        "SELECT 1 FROM users WHERE LOWER(email) = LOWER(%s) AND id != %s LIMIT 1",
+                        (email, exclude_user_id),
+                    )
+                else:
+                    await cur.execute(
+                        "SELECT 1 FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+                        (email,),
+                    )
                 return await cur.fetchone() is not None
 
     # ── writes ───────────────────────────────────────────────────
@@ -208,10 +235,20 @@ class UserRepository:
 
         # SET clauses are whitelisted fragments; user values are parameterized.
         query = "UPDATE users SET " + ", ".join(sets) + " WHERE id = %s"  # nosec B608
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(query, tuple(params))
-                await conn.commit()
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(query, tuple(params))
+                    await conn.commit()
+        except pymysql.err.IntegrityError as exc:
+            # MySQL error 1062 = duplicate entry
+            error_msg = str(exc)
+            if "Duplicate entry" in error_msg:
+                if "email" in error_msg.lower():
+                    raise DuplicateFieldError("email", email or "") from exc
+                if "username" in error_msg.lower():
+                    raise DuplicateFieldError("username", "") from exc
+            raise
 
         row = await self.get_by_id(user_id)
         if row is None:

@@ -12,7 +12,7 @@ from app.config import settings
 from app.core.database import get_pool
 from app.core.logging import get_logger
 from app.repositories.auth_repo import AuthRepository
-from app.repositories.user_repo import UserRepository
+from app.repositories.user_repo import DuplicateFieldError, UserRepository
 from app.services.twilio_service import SMSResult, TwilioService, get_twilio_service
 from app.utils.jwt_util import JWTUtil
 from app.utils.otp_util import can_request_new_otp, generate_otp, get_otp_expiry, is_otp_expired
@@ -290,16 +290,19 @@ class AuthService:
         profession: Optional[str] = None,
         interest: Optional[str] = None,
     ) -> Dict[str, Any]:
-        user = await self.user_repo.update_profile(
-            user_id,
-            first_name=first_name,
-            last_name=last_name,
-            gender=gender,
-            email=email,
-            about_me=about_me,
-            profession=profession,
-            interest=interest,
-        )
+        try:
+            user = await self.user_repo.update_profile(
+                user_id,
+                first_name=first_name,
+                last_name=last_name,
+                gender=gender,
+                email=email,
+                about_me=about_me,
+                profession=profession,
+                interest=interest,
+            )
+        except DuplicateFieldError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"This {exc.field} is already in use") from exc
         if not user:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
         return _sanitize(user)

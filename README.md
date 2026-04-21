@@ -360,6 +360,9 @@ Explanation:
 | `DB_USERNAME`                               | No       | `root`                            | MySQL user                                      |
 | `DB_PASSWORD`                               | Yes      | —                                 | MySQL password                                  |
 | `DB_POOL_SIZE`                              | No       | `10`                              | Max connections in pool                         |
+| `DB_POOL_NAME`                              | No       | `orchestrator_pool`               | Connection pool name                            |
+| `DB_CONNECTION_TIMEOUT`                     | No       | `20`                              | Connection timeout in seconds                   |
+| `DB_POOL_LOG_CONNECTIONS`                   | No       | `false`                           | Log pool connection events                      |
 | **JWT (RS256)**                             |          |                                   |                                                 |
 | `JWT_PRIVATE_KEY`                           | Yes      | —                                 | RSA private key PEM (escape newlines as `\n`)   |
 | `JWT_PUBLIC_KEY`                            | Yes      | —                                 | RSA public key PEM                              |
@@ -373,6 +376,7 @@ Explanation:
 | `TWILIO_PHONE_NUMBER`                       | Yes      | —                                 | Twilio sender number (E.164)                    |
 | `TWILIO_VERIFY_SERVICE_SID`                 | No       | —                                 | Twilio Verify service (optional)                |
 | **OTP**                                     |          |                                   |                                                 |
+| `OTP_LENGTH`                                | No       | `6`                               | OTP code length (digits)                        |
 | `OTP_EXPIRY_SECONDS`                        | No       | `300`                             | OTP validity (5 min)                            |
 | `OTP_MAX_ATTEMPTS`                          | No       | `3`                               | Max failed OTP attempts                         |
 | `OTP_COOLDOWN_SECONDS`                      | No       | `30`                              | Min seconds between sends                       |
@@ -395,6 +399,10 @@ Explanation:
 | `SCHOLARSHIP_DISCOVERY_SERVICE_URL`         | No       | —                                 | Scholarship discovery service base URL          |
 | `ELIGIBILITY_SERVICE_URL`                   | No       | —                                 | Eligibility engine base URL                     |
 | `APPLICATION_SUPPORT_SERVICE_URL`           | No       | —                                 | Application support service base URL            |
+| **HTTP Client**                             |          |                                   |                                                 |
+| `AGENT_CALL_TIMEOUT`                        | No       | `30`                              | Downstream agent call timeout (seconds)         |
+| `AGENT_CALL_RETRIES`                        | No       | `2`                               | Max retry attempts for failed agent calls       |
+| `AGENT_CALL_BACKOFF_FACTOR`                 | No       | `1.0`                             | Exponential backoff multiplier                  |
 | **Password Reset**                          |          |                                   |                                                 |
 | `FORGOT_PASSWORD_COOLDOWN_DAYS`             | No       | `7`                               | Min days between forgot-password resets         |
 | `RESET_PASSWORD_COOLDOWN_DAYS`              | No       | `30`                              | Min days between authenticated password changes |
@@ -509,8 +517,9 @@ Docker, inter-service, and agent settings are documented in `.env.example`.
 
 ```
 migrations/
-├── 001_create_users.sql   # users + auth_sessions + otp_logs
-└── 002_create_chats.sql   # projects + chats + messages
+├── 001_create_users.sql                         # users + auth_sessions + otp_logs
+├── 002_create_chats.sql                         # projects + chats + messages
+└── 003_create_workflow_and_agent_call_logs.sql  # workflow_runs + agent_call_logs
 ```
 
 All migrations are **idempotent** using `CREATE TABLE IF NOT EXISTS` — safe to re-run.
@@ -1006,15 +1015,30 @@ ouroboros-ai-orchestrator/
 │   │   ├── auth.py                 # Auth endpoints (signup, OTP, login, profile, sessions)
 │   │   ├── chats.py                # Chat endpoints (CRUD, messages, starred, project)
 │   │   ├── projects.py             # Project endpoints (CRUD)
+│   │   ├── workflows.py            # Workflow endpoints (profile readiness, status, retry)
+│   │   ├── internal.py             # Internal JWKS endpoint for downstream verifiers
 │   │   └── health.py               # GET / and /health
+│   ├── clients/                    # HTTP clients for downstream agent services
+│   │   ├── agent_client.py         # Base async HTTP client with retry logic
+│   │   ├── student_profile_client.py
+│   │   ├── program_discovery_client.py
+│   │   ├── scholarship_discovery_client.py
+│   │   ├── eligibility_engine_client.py
+│   │   └── application_support_client.py
 │   ├── core/                       # Infrastructure with startup/shutdown lifecycle
 │   │   ├── database.py             # aiomysql async connection pool (create, close, get)
 │   │   └── logging.py              # structlog configuration (setup_logging, get_logger)
+│   ├── security/                   # Internal service token issuance and JWKS
+│   │   ├── internal_token_issuer.py  # Issue short-lived internal bearer tokens
+│   │   └── internal_token_jwks.py    # JWKS endpoint for downstream verifiers
 │   ├── services/                   # Business logic (no SQL, no HTTP)
 │   │   ├── auth_service.py         # Auth orchestration (signup → OTP → login → tokens)
 │   │   ├── chat_service.py         # Chat CRUD, message handling, starred, project assignment
 │   │   ├── project_service.py      # Project CRUD, chat count management
-│   │   └── twilio_service.py       # Twilio OTP delivery
+│   │   ├── twilio_service.py       # Twilio OTP delivery
+│   │   ├── profile_gate_service.py # Profile readiness checks before agent routing
+│   │   ├── intent_registry_service.py  # Intent classification and agent mapping
+│   │   └── agent_availability_service.py  # Health checks for downstream agents
 │   ├── models/                     # Pydantic request/response schemas
 │   │   ├── common.py               # StandardResponse, PaginatedResponse
 │   │   ├── auth.py                 # Auth models with Swagger examples
@@ -1025,7 +1049,9 @@ ouroboros-ai-orchestrator/
 │   │   ├── auth_repo.py            # Auth sessions & OTP audit logs
 │   │   ├── chat_repo.py            # Chat CRUD (soft delete, starred, project, pagination)
 │   │   ├── message_repo.py         # Message CRUD (pagination by chat)
-│   │   └── project_repo.py         # Project CRUD (soft delete, pagination)
+│   │   ├── project_repo.py         # Project CRUD (soft delete, pagination)
+│   │   ├── workflow_run_repo.py    # Workflow run state tracking
+│   │   └── agent_call_log_repo.py  # Downstream call audit logs
 │   ├── middleware/
 │   │   ├── auth_middleware.py      # JWT RS256 validation + get_current_user
 │   │   └── logging_middleware.py   # X-Trace-ID propagation
@@ -1043,7 +1069,9 @@ ouroboros-ai-orchestrator/
 │   ├── config.py                   # Pydantic settings from .env
 │   └── main.py                     # FastAPI app, lifespan, middleware, OpenAPI
 ├── migrations/
-│   └── 001_create_users.sql        # users + auth_sessions + otp_logs
+│   ├── 001_create_users.sql        # users + auth_sessions + otp_logs
+│   ├── 002_create_chats.sql        # projects + chats + messages
+│   └── 003_create_workflow_and_agent_call_logs.sql  # workflow_runs + agent_call_logs
 ├── scripts/
 │   ├── run_migrations.py           # Execute migrations in order
 │   └── seed_users.py               # Seed OuroborosAI team members
@@ -1064,8 +1092,6 @@ ouroboros-ai-orchestrator/
 ├── pre-commit-check.sh
 └── README.md
 ```
-
-Additional workflow and token modules live in `app/clients/`, `app/security/`, and the workflow docs at the repo root.
 
 ### Why `app/core/`?
 
@@ -1096,7 +1122,7 @@ The orchestrator uses async I/O (`aiomysql`), which means infrastructure like th
 | **401** | `{"detail": "Invalid credentials"}`                                                                                                |
 | **403** | `{"detail": "Account is disabled"}`                                                                                                |
 | **404** | `{"detail": "User not found"}`                                                                                                     |
-| **409** | `{"detail": "Phone number already registered"}`                                                                                    |
+| **409** | `{"detail": "Phone number already registered"}`, `{"detail": "This email is already in use"}`                                      |
 | **422** | Pydantic validation errors                                                                                                         |
 | **429** | `{"detail": "Too many OTP requests. Please try again later."}` (also MFA daily limit, password cooldowns)                          |
 | **500** | `{"detail": "Failed to send OTP. Please try again."}` when Twilio SMS fails (signup, resend, forgot-password, MFA login challenge) |

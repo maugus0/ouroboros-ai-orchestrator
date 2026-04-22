@@ -146,6 +146,9 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
         if chat_id:
             notice_content = _build_document_upload_notice(result, document_type, filename)
             notice_title = _build_document_upload_title(document_type, filename)
+            parse_agent_reasoning = None
+            if isinstance(profile_data, dict) and isinstance(profile_data.get("agent_reasoning"), dict):
+                parse_agent_reasoning = profile_data.get("agent_reasoning")
             await chat_service.post_assistant_notice(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -157,6 +160,7 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
                     "file_name": filename,
                     "intent": intent,
                     "upload_result": result if isinstance(result, dict) else None,
+                    "agent_reasoning": parse_agent_reasoning,
                 },
             )
 

@@ -39,8 +39,8 @@ def get_server_connection():
     conn = mysql.connector.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "3306")),
-        user=os.getenv("DB_USERNAME", "root"),
-        password=os.getenv("DB_PASSWORD", ""),
+        user=os.getenv("MIGRATION_DB_USERNAME") or os.getenv("DB_USERNAME", "root"),
+        password=os.getenv("MIGRATION_DB_PASSWORD") or os.getenv("DB_PASSWORD", ""),
     )
     cursor = conn.cursor()
     cursor.execute("SET time_zone = '+00:00'")

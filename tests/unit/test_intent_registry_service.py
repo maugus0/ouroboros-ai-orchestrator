@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from app.services.intent_registry_service import IntentRegistryService
 
 
@@ -59,6 +61,25 @@ def test_detect_intent_profile_completion_for_gpa_clarification_answer():
     intent = service.detect_intent("3.8/4.0")
 
     assert intent == "profile_completion"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Can you write my SOP for NUS?",
+        "I need a statement of purpose",
+        "Help me draft a personal statement",
+        "Create an application checklist",
+        "What are my application deadlines?",
+        "Draft a cover letter for this program",
+    ],
+)
+def test_detect_intent_application_support_keywords(message):
+    service = IntentRegistryService()
+
+    intent = service.detect_intent(message)
+
+    assert intent == "application_planning"
 
 
 def test_effective_required_fields_include_base_and_intent_overlay(tmp_path):

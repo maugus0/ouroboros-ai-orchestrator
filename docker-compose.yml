@@ -39,6 +39,8 @@ services:
       - DB_NAME=${DB_NAME:-ouroboros_orchestrator_db}
       - DB_USERNAME=${APP_DB_USERNAME:-ouroboros_app}
       - DB_PASSWORD=${APP_DB_PASSWORD:-app_password}
+      - MIGRATION_DB_USERNAME=root
+      - MIGRATION_DB_PASSWORD=${MYSQL_ROOT_PASSWORD:-root_password}
       - MYSQL_HOST=orchestrator-mysql
       - MYSQL_PORT=3306
       - MYSQL_DATABASE=${DB_NAME:-ouroboros_orchestrator_db}

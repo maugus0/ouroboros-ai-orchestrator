@@ -26,7 +26,10 @@ fi
 cd "${SCRIPT_DIR}"
 
 if [ "${RUN_STARTUP_SCRIPTS:-true}" = "true" ]; then
+    echo "RUN_STARTUP_SCRIPTS=true; running startup migrations..."
     "${PYTHON_BIN}" scripts/run_migrations.py
+else
+    echo "Skipping startup migrations (set RUN_STARTUP_SCRIPTS=true to enable)."
 fi
 
 "${PYTHON_BIN}" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

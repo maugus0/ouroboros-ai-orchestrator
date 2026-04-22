@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.core.logging import get_logger
+from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS
 
 logger = get_logger(__name__)
 
@@ -412,23 +413,6 @@ _APPLICATION_KEYWORDS: frozenset[str] = frozenset(
     }
 )
 
-_APPLICATION_SUPPORT_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "sop",
-        "statement of purpose",
-        "personal statement",
-        "cover letter",
-        "checklist",
-        "document list",
-        "application steps",
-        "application plan",
-        "application timeline",
-        "deadline",
-        "deadlines",
-        "timeline",
-    }
-)
-
 
 class IntentRegistryService:
     """Loads and serves intent policy used by chat orchestration."""
@@ -490,12 +474,6 @@ class IntentRegistryService:
                 return "program_discovery"
             return "eligibility_check"
 
-        if any(
-            token in lowered
-            for token in ("application plan", "application timeline", "statement of purpose", "cover letter")
-        ):
-            return "application_planning"
-
         return "out_of_scope"
 
     def _is_program_discovery_query(self, lowered: str) -> bool:
@@ -523,7 +501,7 @@ class IntentRegistryService:
     @staticmethod
     def _is_application_support_query(lowered: str) -> bool:
         """Check if query should be handled by application-support."""
-        return any(token in lowered for token in _APPLICATION_SUPPORT_KEYWORDS)
+        return any(token in lowered for token in APPLICATION_SUPPORT_KEYWORDS)
 
     def _has_university_mention(self, lowered: str) -> bool:
         """Check if query mentions a university by name or pattern."""

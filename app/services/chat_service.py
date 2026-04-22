@@ -27,6 +27,7 @@ from app.repositories.message_repo import MessageRepository
 from app.repositories.project_repo import ProjectRepository
 from app.repositories.workflow_run_repo import WorkflowRunRepository
 from app.services.agent_availability_service import AgentAvailabilityService
+from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS, detect_application_support_action
 from app.services.intent_registry_service import IntentRegistryService
 from app.services.profile_gate_service import ProfileGateService
 
@@ -1440,10 +1441,7 @@ class ChatService:
             return any(token in lowered for token in ["eligible", "eligibility", "qualify", "qualified"])
 
         if detected_intent in {"application_planning", "apply_to_named_school"}:
-            return any(
-                token in lowered
-                for token in ["application", "apply", "deadline", "statement of purpose", "cover letter", "timeline"]
-            )
+            return any(token in lowered for token in APPLICATION_SUPPORT_KEYWORDS | {"application", "apply"})
 
         return False
 
@@ -1723,16 +1721,7 @@ class ChatService:
 
     @staticmethod
     def _detect_application_support_action(user_message: str) -> str:
-        lowered = (user_message or "").lower()
-        if any(token in lowered for token in ["sop", "statement of purpose", "personal statement"]):
-            return "sop"
-        if "cover letter" in lowered:
-            return "cover_letter"
-        if any(token in lowered for token in ["deadline", "timeline"]):
-            return "deadlines"
-        if any(token in lowered for token in ["checklist", "document list", "application steps", "application plan"]):
-            return "checklist"
-        return "checklist"
+        return detect_application_support_action(user_message)
 
     @staticmethod
     def _extract_target_program_from_message(user_message: str) -> Optional[str]:

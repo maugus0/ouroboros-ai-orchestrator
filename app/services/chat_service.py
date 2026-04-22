@@ -642,7 +642,9 @@ class ChatService:
                 retry_of_log_id=retry_of_log_id,
             )
             first_clarification_field = self._extract_clarification_field(clarifications_before)
-            if first_clarification_field:
+            # Only route through ReAct clarification if the field matches the gate's requirements
+            missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+            if first_clarification_field and first_clarification_field in missing_fields:
                 clarification_submission = await self.profile_gate_service.submit_profile_clarification_answers(
                     user_id=user_id,
                     profile_id=str(profile_id),
@@ -704,6 +706,13 @@ class ChatService:
                 )
             clarification_field = self._extract_clarification_field(clarifications)
             clarification_question = self._extract_clarification_question(clarifications)
+
+        # When routed via clarification submission, propagate applied_fields so the
+        # response formatter can emit "Great, I saved your X." on the next question.
+        if isinstance(clarification_submission, dict) and collected_from_chat is None:
+            submission_applied = _as_string_list(clarification_submission.get("applied_fields"))
+            if submission_applied:
+                collected_from_chat = {"applied_fields": submission_applied}
 
         return refreshed_gate, collected_from_chat, clarification_field, clarification_question
 
@@ -1171,9 +1180,6 @@ class ChatService:
         was_already_reminded = await self._has_recent_profile_gate_reminder(chat_id)
         missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
 
-        if clarification_question:
-            return clarification_question, gate
-
         if no_fields_extracted and is_domain_query and was_already_reminded:
             logger.info(
                 "profile_gate_bypass_after_reminder",
@@ -1338,7 +1344,7 @@ class ChatService:
             if applied:
                 applied_text = self._join_humanized_labels(applied)
                 return f"Great, I saved your {applied_text}. {clarification_question}"
-            return clarification_question
+            # No fields saved yet - fall through to the friendly first-time format below
 
         first_missing = self._format_profile_field_label(missing_fields[0])
         applied = [self._format_profile_field_label(field) for field in (applied_fields or []) if field]

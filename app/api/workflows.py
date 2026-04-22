@@ -1,7 +1,7 @@
 """Workflow visibility endpoints for readiness, uploads, and orchestration state."""
 
 import base64
-from typing import Any
+from typing import Any, Awaitable, Callable, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
@@ -121,17 +121,28 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
             target_degree_hint=target_degree_hint,
             run_gap_analysis=run_gap_analysis,
         )
-        profile_data = result.get("data") if isinstance(result.get("data"), dict) else None
+        profile_data = None
+        if isinstance(result, dict):
+            nested_data = result.get("data")
+            profile_data = nested_data if isinstance(nested_data, dict) else result
         profile_id = profile_data.get("profile_id") if isinstance(profile_data, dict) else None
         if isinstance(profile_data, dict) and isinstance(profile_id, str) and profile_id:
-            clarifications = await profile_gate_service.get_profile_clarifications(user_id, profile_id)
-            if isinstance(clarifications, dict):
-                profile_data["clarification_queue"] = clarifications.get(
-                    "clarification_queue", profile_data.get("clarification_queue", [])
+            get_profile_clarifications = getattr(profile_gate_service, "get_profile_clarifications", None)
+            if callable(get_profile_clarifications):
+                typed_get_profile_clarifications = cast(
+                    Callable[[str, str], Awaitable[dict[str, Any] | None]],
+                    get_profile_clarifications,
                 )
-                profile_data["react_decision_trace"] = clarifications.get(
-                    "react_decision_trace", profile_data.get("react_decision_trace", {})
+                clarifications = await typed_get_profile_clarifications(  # pylint: disable=not-callable
+                    user_id, profile_id
                 )
+                if isinstance(clarifications, dict):
+                    profile_data["clarification_queue"] = clarifications.get(
+                        "clarification_queue", profile_data.get("clarification_queue", [])
+                    )
+                    profile_data["react_decision_trace"] = clarifications.get(
+                        "react_decision_trace", profile_data.get("react_decision_trace", {})
+                    )
         profile_gate_service.invalidate_readiness_cache(user_id, intent)
 
         if chat_id:

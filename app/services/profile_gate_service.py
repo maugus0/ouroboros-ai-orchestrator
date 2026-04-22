@@ -321,6 +321,7 @@ class ProfileGateService:
 
         result = {
             "user_id": readiness.get("user_id", user_id),
+            "profile_id": readiness.get("profile_id"),
             "missing_fields": list(readiness.get("missing_fields") or []),
             "optional_missing_fields": list(readiness.get("optional_missing_fields") or []),
             "updated_at": readiness.get("updated_at"),
@@ -432,6 +433,8 @@ class ProfileGateService:
             if not isinstance(payload, dict):
                 return None
             data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            if isinstance(data, dict):
+                self.invalidate_readiness_cache(user_id)
             return data if isinstance(data, dict) else None
         except AgentClientError as exc:
             await self._record_agent_call(

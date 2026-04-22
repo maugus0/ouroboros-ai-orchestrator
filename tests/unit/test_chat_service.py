@@ -1025,7 +1025,10 @@ async def test_send_message_uses_clarification_question_from_student_profile(
     )
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    assert assistant_kwargs["content"] == "What is your current degree level?"
+    assert assistant_kwargs["content"] == (
+        "I can help with scholarships and program searches, but I need to finish your profile first. "
+        "Let's start with your current degree level. Once you send that, I'll ask for the next detail."
+    )
     assert assistant_kwargs["metadata"]["profile_gate"]["profile_id"] == "profile-1"
 
 
@@ -1046,7 +1049,7 @@ async def test_send_message_binary_reply_routes_to_react_clarification_submissio
             "user_id": "user-456",
             "profile_id": "profile-1",
             "completed": False,
-            "missing_fields": ["target_degree_level"],
+            "missing_fields": ["publications", "target_degree_level"],
             "updated_at": None,
             "allowed": False,
             "reason": "profile_incomplete_for_intent",
@@ -1112,7 +1115,7 @@ async def test_send_message_binary_reply_routes_to_react_clarification_submissio
     assert submit_kwargs["answers"] == [{"field": "publications", "value": "No"}]
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    assert assistant_kwargs["content"] == "What is your target degree level?"
+    assert assistant_kwargs["content"] == "Great, I saved your publications. What is your target degree level?"
 
 
 @pytest.mark.asyncio
@@ -1197,7 +1200,7 @@ async def test_send_message_non_binary_degree_reply_routes_to_react_clarificatio
     assert submit_kwargs["answers"] == [{"field": "current_degree_level", "value": "master degree"}]
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    assert assistant_kwargs["content"] == "What is your target degree level?"
+    assert assistant_kwargs["content"] == "Great, I saved your current degree level. What is your target degree level?"
 
 
 @pytest.mark.asyncio

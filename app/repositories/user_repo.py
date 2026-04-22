@@ -1,15 +1,49 @@
 """Data-access layer for the users table (phone-based auth)."""
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Optional
 
 import aiomysql
+import pymysql.err  # type: ignore[import-untyped]
 
 from app.core.logging import get_logger
 from app.utils.profile_completion import is_profile_complete
 
 logger = get_logger(__name__)
+
+# MySQL error codes
+_MYSQL_ER_DUP_ENTRY = 1062
+
+# Regex to extract key name from MySQL duplicate entry error message
+# Format: "Duplicate entry 'value' for key 'table.key_name'" or "'key_name'"
+_DUP_KEY_PATTERN = re.compile(r"for key '(?:\w+\.)?(\w+)'")
+
+
+def _extract_duplicate_key_field(exc: pymysql.err.IntegrityError) -> Optional[str]:
+    """Extract the violated unique key field name from a MySQL IntegrityError.
+
+    MySQL duplicate entry errors have format:
+      "Duplicate entry 'value' for key 'table.column'" or "'column'"
+
+    Returns the column name (e.g., 'email', 'username') or None if not parseable.
+    """
+    if len(exc.args) < 2:
+        return None
+    error_msg = str(exc.args[1]) if exc.args[1] else ""
+    match = _DUP_KEY_PATTERN.search(error_msg)
+    return match.group(1) if match else None
+
+
+class DuplicateFieldError(Exception):
+    """Raised when a unique field value already exists in the database."""
+
+    def __init__(self, field: str, value: str) -> None:
+        self.field = field
+        self.value = value
+        super().__init__(f"{field} '{value}' is already in use")
+
 
 _PROFILE_COLS = """
     id, username, phone_number, phone_country_code, phone_verified,
@@ -84,6 +118,22 @@ class UserRepository:
                     "SELECT 1 FROM users WHERE LOWER(username) = LOWER(%s) LIMIT 1",
                     (username,),
                 )
+                return await cur.fetchone() is not None
+
+    async def email_exists(self, email: str, exclude_user_id: Optional[str] = None) -> bool:
+        """Check if email is already in use (optionally excluding a specific user)."""
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                if exclude_user_id:
+                    await cur.execute(
+                        "SELECT 1 FROM users WHERE LOWER(email) = LOWER(%s) AND id != %s LIMIT 1",
+                        (email, exclude_user_id),
+                    )
+                else:
+                    await cur.execute(
+                        "SELECT 1 FROM users WHERE LOWER(email) = LOWER(%s) LIMIT 1",
+                        (email,),
+                    )
                 return await cur.fetchone() is not None
 
     # ── writes ───────────────────────────────────────────────────
@@ -208,10 +258,25 @@ class UserRepository:
 
         # SET clauses are whitelisted fragments; user values are parameterized.
         query = "UPDATE users SET " + ", ".join(sets) + " WHERE id = %s"  # nosec B608
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(query, tuple(params))
-                await conn.commit()
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(query, tuple(params))
+                    await conn.commit()
+        except pymysql.err.IntegrityError as exc:
+            errno = exc.args[0] if exc.args else None
+            if errno == _MYSQL_ER_DUP_ENTRY:
+                violated_field = _extract_duplicate_key_field(exc)
+                if violated_field == "email":
+                    raise DuplicateFieldError("email", email or "") from exc
+                if violated_field == "username":
+                    raise DuplicateFieldError("username", "") from exc
+                logger.warning(
+                    "unhandled_duplicate_key",
+                    violated_field=violated_field,
+                    error=str(exc),
+                )
+            raise
 
         row = await self.get_by_id(user_id)
         if row is None:

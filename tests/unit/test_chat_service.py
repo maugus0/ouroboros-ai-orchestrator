@@ -89,6 +89,12 @@ def mock_program_discovery_client():
     """Create a mock program discovery client."""
     client = MagicMock()
     client.probe_health = AsyncMock(return_value={"status": "ok"})
+    client.ask_question = AsyncMock(
+        return_value={
+            "answer": "Here are some programs that match your criteria.",
+            "programs": [],
+        }
+    )
     return client
 
 
@@ -229,8 +235,9 @@ async def test_send_message_success(
     sample_chat,
     sample_message,
     mock_profile_gate_service,
+    mock_program_discovery_client,
 ):
-    """Test sending a message successfully."""
+    """Test sending a message successfully with PDA integration."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -246,7 +253,7 @@ async def test_send_message_success(
     result = await chat_service.send_message(
         user_id="user-456",
         chat_id="chat-123",
-        content="Hello!",
+        content="Find programs for me",
     )
 
     assert "user_message" in result
@@ -254,7 +261,8 @@ async def test_send_message_success(
     assert "chat" in result
     assert mock_message_repo.create.call_count == 2
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    assert "Great, I can help" in assistant_kwargs["content"]
+    assert "programs that match" in assistant_kwargs["content"]
+    mock_program_discovery_client.ask_question.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -265,10 +273,14 @@ async def test_send_message_reuses_cached_response_for_repeated_turns(
     sample_chat,
     sample_message,
     mock_profile_gate_service,
+    mock_program_discovery_client,
 ):
     """Repeated identical turns in the same chat should reuse the cached assistant response."""
     ChatService._RESPONSE_CACHE.clear()
-    chat_service._build_intent_ready_response = MagicMock(return_value="cached-intent-response")
+    mock_program_discovery_client.ask_question.return_value = {
+        "answer": "Here are graduate programs matching your criteria.",
+        "programs": [],
+    }
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -298,12 +310,12 @@ async def test_send_message_reuses_cached_response_for_repeated_turns(
         content="Find graduate programs for me",
     )
 
-    assert chat_service._build_intent_ready_response.call_count == 1
+    assert mock_program_discovery_client.ask_question.await_count == 1
     assistant_messages = [
         call for call in mock_message_repo.create.call_args_list if call.kwargs.get("role") == "assistant"
     ]
     assert len(assistant_messages) == 2
-    assert assistant_messages[-1].kwargs["content"] == "cached-intent-response"
+    assert assistant_messages[-1].kwargs["content"] == "Here are graduate programs matching your criteria."
 
 
 @pytest.mark.asyncio
@@ -565,8 +577,10 @@ async def test_send_message_profile_gate_collects_and_rechecks(
     sample_chat,
     sample_message,
     mock_profile_gate_service,
+    mock_program_discovery_client,
 ):
     """Test that profile fields from chat are collected before the second gate decision."""
+    _ = mock_program_discovery_client  # Used indirectly via chat_service fixture
     mock_profile_gate_service.evaluate_gate.side_effect = [
         {
             "user_id": "user-456",
@@ -600,7 +614,7 @@ async def test_send_message_profile_gate_collects_and_rechecks(
     assert mock_profile_gate_service.evaluate_gate.await_count == 2
     mock_profile_gate_service.collect_profile_updates_from_chat.assert_awaited_once()
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    assert "Great, I can help" in assistant_kwargs["content"]
+    assert "programs that match" in assistant_kwargs["content"]
     assert assistant_kwargs["metadata"]["profile_gate"]["allowed"] is True
 
 
@@ -614,7 +628,7 @@ async def test_send_message_program_discovery_mentions_singapore_when_present(
     mock_profile_gate_service,
     mock_program_discovery_client,
 ):
-    """Program discovery reply should acknowledge Singapore when user mentions it."""
+    """Program discovery reply should call PDA with the user's question."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -625,6 +639,10 @@ async def test_send_message_program_discovery_mentions_singapore_when_present(
     }
     chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
+    mock_program_discovery_client.ask_question.return_value = {
+        "answer": "Here are graduate programs in Singapore that match your profile.",
+        "programs": [],
+    }
 
     mock_chat_repo.get_by_id_with_user.return_value = sample_chat
     mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
@@ -638,7 +656,7 @@ async def test_send_message_program_discovery_mentions_singapore_when_present(
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
     assert "programs in Singapore" in assistant_kwargs["content"]
-    mock_program_discovery_client.probe_health.assert_awaited_once()
+    mock_program_discovery_client.ask_question.assert_awaited_once()
 
 
 @pytest.mark.asyncio

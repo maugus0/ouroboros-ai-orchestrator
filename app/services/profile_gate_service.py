@@ -20,6 +20,102 @@ from app.services.intent_registry_service import IntentRegistryService
 
 logger = get_logger(__name__)
 
+# --- Module-level constants for field validation (avoid per-call allocation) ---
+
+_BLOCKED_FIELD_PREFIXES: tuple[str, ...] = (
+    "i ",
+    "my ",
+    "we ",
+    "looking ",
+    "planning ",
+    "want ",
+    "need ",
+    "study ",
+)
+
+_NON_ACADEMIC_DESCRIPTORS: frozenset[str] = frozenset(
+    {
+        "budget-friendly",
+        "budget friendly",
+        "affordable",
+        "cheap",
+        "expensive",
+        "top",
+        "best",
+        "worst",
+        "good",
+        "bad",
+        "ranked",
+        "ranking",
+        "prestigious",
+        "elite",
+        "famous",
+        "popular",
+        "new",
+        "old",
+        "large",
+        "small",
+        "online",
+        "remote",
+        "nearby",
+        "local",
+        "international",
+        "global",
+        "free",
+    }
+)
+
+_DEGREE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "phd",
+        "doctorate",
+        "doctoral",
+        "master",
+        "masters",
+        "msc",
+        "m.sc",
+        "ms",
+        "mba",
+        "bachelor",
+        "bachelors",
+        "bsc",
+        "b.sc",
+        "bs",
+        "high school",
+        "highschool",
+        "undergraduate",
+    }
+)
+
+_DEGREE_PHRASES: frozenset[str] = frozenset(
+    {
+        "master degree",
+        "masters degree",
+        "master's degree",
+        "bachelor degree",
+        "bachelors degree",
+        "bachelor's degree",
+        "phd degree",
+        "doctoral degree",
+        "doctorate degree",
+        "undergraduate degree",
+    }
+)
+
+_DEGREE_PHRASE_MAP: dict[str, str] = {
+    "master degree": "master",
+    "masters degree": "master",
+    "master's degree": "master",
+    "bachelor degree": "bachelor",
+    "bachelors degree": "bachelor",
+    "bachelor's degree": "bachelor",
+    "phd degree": "phd",
+    "doctoral degree": "phd",
+    "doctorate degree": "phd",
+    "undergraduate degree": "bachelor",
+    "high school degree": "high_school",
+}
+
 
 def _lazy_student_profile_client() -> StudentProfileClient:
     return StudentProfileClient()
@@ -917,52 +1013,33 @@ class ProfileGateService:
             return False
 
         lowered = normalized.lower()
-        blocked_prefixes = (
-            "i ",
-            "my ",
-            "we ",
-            "looking ",
-            "planning ",
-            "want ",
-            "need ",
-            "study ",
-        )
-        if lowered.startswith(blocked_prefixes):
+        if lowered.startswith(_BLOCKED_FIELD_PREFIXES):
             return False
 
-        degree_keywords = {
-            "phd",
-            "doctorate",
-            "doctoral",
-            "master",
-            "masters",
-            "msc",
-            "m.sc",
-            "ms",
-            "mba",
-            "bachelor",
-            "bachelors",
-            "bsc",
-            "b.sc",
-            "bs",
-            "high school",
-            "highschool",
-            "undergraduate",
-        }
-        if lowered in degree_keywords:
+        if lowered in _NON_ACADEMIC_DESCRIPTORS:
+            return False
+
+        if lowered in _DEGREE_KEYWORDS:
+            return False
+
+        if lowered in _DEGREE_PHRASES:
             return False
 
         return len(normalized.split()) <= 5
 
     @staticmethod
     def _extract_bare_degree_level_candidate(text: str, degree_map: dict[str, str]) -> Optional[str]:
-        normalized_text = text.strip().strip(".,")
+        normalized_text = text.strip().strip(".,").lower()
         if not normalized_text:
             return None
 
         for needle, normalized in degree_map.items():
             if normalized_text == needle:
                 return normalized
+
+        if normalized_text in _DEGREE_PHRASE_MAP:
+            return _DEGREE_PHRASE_MAP[normalized_text]
+
         return None
 
     @classmethod

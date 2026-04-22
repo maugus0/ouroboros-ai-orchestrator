@@ -109,6 +109,17 @@ def test_extract_intended_field_of_study_bare_answer():
     assert extracted["intended_field_of_study"] == "Computer Science"
 
 
+def test_extract_intended_field_of_study_ignores_degree_phrase_answer():
+    content = "master degree"
+
+    extracted = ProfileGateService.extract_profile_fields_from_chat(
+        content,
+        ["intended_field_of_study"],
+    )
+
+    assert "intended_field_of_study" not in extracted
+
+
 def test_extract_funding_source_multiple_options():
     content = "I am looking for scholarship support, otherwise student loan is possible."
 
@@ -151,6 +162,18 @@ def test_extract_target_degree_level_from_bare_degree_answer():
     )
 
     assert extracted["target_degree_level"] == "phd"
+
+
+def test_bare_degree_answer_prefers_current_degree_when_both_are_missing():
+    content = "Master"
+
+    extracted = ProfileGateService.extract_profile_fields_from_chat(
+        content,
+        ["current_degree_level", "target_degree_level"],
+    )
+
+    assert extracted["current_degree_level"] == "master"
+    assert "target_degree_level" not in extracted
 
 
 def test_bare_degree_answer_does_not_fill_intended_field_of_study():

@@ -16,17 +16,29 @@ def is_profile_complete(user: Optional[Mapping[str, Any]]) -> bool:
 
     Signup already collects ``first_name`` / ``last_name``; those are not part of this gate.
     """
+    return not get_missing_profile_fields(user)
+
+
+def get_missing_profile_fields(user: Optional[Mapping[str, Any]]) -> list[str]:
+    """Return the profile fields that still need user input."""
     if not user:
-        return False
+        return ["gender", "email", "about_me", "profession", "interest"]
+
+    missing: list[str] = []
+
     gender = user.get("gender")
-    email = (user.get("email") or "").strip()
-    about = (user.get("about_me") or "").strip()
-    profession = (user.get("profession") or "").strip()
-    interest = user.get("interest")
     if gender is None or str(gender).strip().lower() not in _VALID_GENDERS:
-        return False
-    if not email or not about or not profession:
-        return False
-    if interest is None:
-        return False
-    return str(interest).strip().lower() in _VALID_INTERESTS
+        missing.append("gender")
+
+    if not (user.get("email") or "").strip():
+        missing.append("email")
+    if not (user.get("about_me") or "").strip():
+        missing.append("about_me")
+    if not (user.get("profession") or "").strip():
+        missing.append("profession")
+
+    interest = user.get("interest")
+    if interest is None or str(interest).strip().lower() not in _VALID_INTERESTS:
+        missing.append("interest")
+
+    return missing

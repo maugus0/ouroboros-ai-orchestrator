@@ -26,6 +26,7 @@ tenacity>=9.0.0
 pydantic>=2.9.2
 pydantic-settings>=2.6.0
 email-validator>=2.2.0
+pycountry>=24.6.1
 
 # Logging
 structlog>=24.4.0

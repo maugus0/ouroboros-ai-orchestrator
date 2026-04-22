@@ -64,6 +64,25 @@ class Settings(BaseSettings):
     # ---------- Inter-Service Auth ----------
     X_SERVICE_TOKEN: str = ""
 
+    # ---------- Internal Service Token (E3) ----------
+    INTERNAL_TOKEN_ENABLED: bool = False
+    INTERNAL_TOKEN_ISSUER: str = "ouroboros-orchestrator-internal"
+    INTERNAL_TOKEN_TTL_SECONDS: int = 120
+    INTERNAL_TOKEN_SIGNING_ALGORITHM: str = "RS256"
+    INTERNAL_TOKEN_ACTIVE_KID: str = "internal-v1"
+    INTERNAL_TOKEN_PRIVATE_KEY: str = ""
+    INTERNAL_TOKEN_AUDIENCE_MAP: str = (
+        "{"
+        '"student-profile":"ouroboros.student-profile",'
+        '"program-discovery":"ouroboros.program-discovery",'
+        '"scholarship-discovery":"ouroboros.scholarship-discovery",'
+        '"eligibility-engine":"ouroboros.eligibility-engine",'
+        '"application-support":"ouroboros.application-support"'
+        "}"
+    )
+    INTERNAL_TOKEN_PUBLIC_KEYS: str = "{}"
+    INTERNAL_TOKEN_JWKS_CACHE_MAX_AGE_SECONDS: int = 60
+
     # ---------- HTTP Client ----------
     AGENT_CALL_TIMEOUT: int = 30
     AGENT_CALL_RETRIES: int = 2
@@ -82,7 +101,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
-    # ── helpers ──────────────────────────────────────────────────
+    # -- helpers --
 
     def get_db_host(self) -> str:
         return os.getenv("MYSQL_HOST", self.DB_HOST)
@@ -109,6 +128,29 @@ class Settings(BaseSettings):
             return json.loads(self.ALLOWED_COUNTRY_CODES)
         except (json.JSONDecodeError, TypeError):
             return ["SG", "IN", "VN", "ID", "MY", "US", "CA", "AU"]
+
+    def get_internal_token_audience_map(self) -> dict[str, str]:
+        """Parse INTERNAL_TOKEN_AUDIENCE_MAP JSON string into a dict."""
+        try:
+            parsed = json.loads(self.INTERNAL_TOKEN_AUDIENCE_MAP)
+            if isinstance(parsed, dict):
+                return {str(key): str(value) for key, value in parsed.items()}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {
+            "student-profile": "ouroboros.student-profile",
+            "program-discovery": "ouroboros.program-discovery",
+        }
+
+    def get_internal_token_public_keys(self) -> dict[str, str]:
+        """Parse INTERNAL_TOKEN_PUBLIC_KEYS JSON string into a kid->PEM dict."""
+        try:
+            parsed = json.loads(self.INTERNAL_TOKEN_PUBLIC_KEYS)
+            if isinstance(parsed, dict):
+                return {str(key): str(value) for key, value in parsed.items()}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {}
 
 
 settings = Settings()

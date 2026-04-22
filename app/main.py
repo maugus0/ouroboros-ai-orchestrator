@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from app.api import auth, chats, eligibility, health, projects
+from app.api import auth, chats, eligibility, health, internal, projects, workflows
 from app.config import APP_VERSION, settings
 from app.core.database import PoolConfig, close_pool, create_pool
 from app.core.logging import get_logger, setup_logging
@@ -93,7 +93,9 @@ app = FastAPI(
                 "Used to evaluate matches and retrieve explainability results."
             ),
         },
+        {"name": "Workflows", "description": "Workflow readiness and orchestration visibility."},
         {"name": "Health", "description": "System health and readiness checks."},
+        {"name": "Internal", "description": "Internal service-to-service infrastructure endpoints."},
     ],
 )
 
@@ -114,7 +116,9 @@ app.include_router(auth.router)
 app.include_router(chats.router)
 app.include_router(eligibility.router)
 app.include_router(projects.router)
+app.include_router(workflows.router)
 app.include_router(health.router)
+app.include_router(internal.router)
 
 
 # ── Custom OpenAPI (adds JWT Bearer auth to Swagger) ─────────────

@@ -1,5 +1,7 @@
 """Chat session business logic — create, send messages, list, delete."""
 
+# pylint: disable=too-many-lines
+
 import base64
 import binascii
 import hashlib

@@ -199,7 +199,6 @@ class StudentProfileClient(AgentClient):
         *,
         intent: Optional[str] = None,
         document_type: str = "cv",
-        target_degree_hint: Optional[str] = None,
         run_gap_analysis: bool = False,
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -214,8 +213,6 @@ class StudentProfileClient(AgentClient):
             "document_type": document_type,
             "run_gap_analysis": run_gap_analysis,
         }
-        if target_degree_hint is not None:
-            payload["target_degree_hint"] = target_degree_hint
 
         return await self.request(
             "POST",

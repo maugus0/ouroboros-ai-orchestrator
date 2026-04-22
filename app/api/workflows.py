@@ -94,7 +94,6 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
     file: UploadFile = File(...),
     intent: str = Form(default="profile_completion"),
     document_type: str = Form(default="cv"),
-    target_degree_hint: str | None = Form(default=None),
     run_gap_analysis: bool = Form(default=False),
     chat_id: str | None = Form(default=None),
     user_id: str = Depends(get_current_user_id),
@@ -118,7 +117,6 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
             file_content_base64=file_content_base64,
             intent=intent,
             document_type=document_type,
-            target_degree_hint=target_degree_hint,
             run_gap_analysis=run_gap_analysis,
         )
         profile_data = None

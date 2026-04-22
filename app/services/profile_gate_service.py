@@ -321,6 +321,7 @@ class ProfileGateService:
 
         result = {
             "user_id": readiness.get("user_id", user_id),
+            "profile_id": readiness.get("profile_id"),
             "missing_fields": list(readiness.get("missing_fields") or []),
             "optional_missing_fields": list(readiness.get("optional_missing_fields") or []),
             "updated_at": readiness.get("updated_at"),
@@ -345,6 +346,119 @@ class ProfileGateService:
         if readiness.get("updated_at") is not None:
             self._set_cached_readiness(cache_key, result)
         return result
+
+    async def get_profile_clarifications(
+        self,
+        user_id: str,
+        profile_id: str,
+        *,
+        chat_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+        retry_of_log_id: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        """Fetch the latest clarification queue and ReAct trace for a profile."""
+        started_at = time.perf_counter()
+        try:
+            payload = await self.student_profile_client.get_profile_clarifications(
+                profile_id=profile_id,
+                user_id=user_id,
+            )
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="get_profile_clarifications",
+                request_method="GET",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="success",
+                response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            if not isinstance(payload, dict):
+                return None
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            return data if isinstance(data, dict) else None
+        except AgentClientError as exc:
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="get_profile_clarifications",
+                request_method="GET",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            logger.warning(
+                "profile_clarifications_fetch_failed", user_id=user_id, profile_id=profile_id, error=str(exc)
+            )
+            return None
+
+    async def submit_profile_clarification_answers(
+        self,
+        user_id: str,
+        profile_id: str,
+        answers: list[dict[str, Any]],
+        *,
+        chat_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+        retry_of_log_id: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        """Submit chat replies to the active ReAct clarification queue."""
+        started_at = time.perf_counter()
+        try:
+            payload = await self.student_profile_client.submit_profile_clarifications(
+                profile_id=profile_id,
+                user_id=user_id,
+                answers=answers,
+            )
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="submit_profile_clarifications",
+                request_method="POST",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="success",
+                request_payload={"answers": answers},
+                response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            if not isinstance(payload, dict):
+                return None
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            if isinstance(data, dict):
+                self.invalidate_readiness_cache(user_id)
+            return data if isinstance(data, dict) else None
+        except AgentClientError as exc:
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="submit_profile_clarifications",
+                request_method="POST",
+                request_path=f"/api/v1/profiles/{profile_id}/clarifications",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload={"answers": answers},
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            logger.warning(
+                "profile_clarification_submit_failed",
+                user_id=user_id,
+                profile_id=profile_id,
+                error=str(exc),
+            )
+            return None
 
     @staticmethod
     def _extract_readiness_payload(payload: Any) -> Any:
@@ -574,6 +688,86 @@ class ProfileGateService:
             )
             logger.warning(
                 "profile_collect_from_chat_failed",
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                error=str(exc),
+            )
+            return None
+
+    async def persist_profile_updates_from_chat(
+        self,
+        user_id: str,
+        fields: dict[str, Any],
+        *,
+        chat_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+        retry_of_log_id: Optional[str] = None,
+    ) -> dict[str, Any] | None:
+        """Persist already-normalized profile updates derived from an active slot prompt."""
+        explicit_fields = {key: value for key, value in (fields or {}).items() if value is not None}
+        if not explicit_fields:
+            return None
+
+        started_at = time.perf_counter()
+        try:
+            payload = await self.student_profile_client.collect_from_chat(
+                user_id=user_id,
+                fields=explicit_fields,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="collect_from_chat",
+                request_method="POST",
+                request_path="/api/v1/profiles/collect-from-chat",
+                call_status="success",
+                request_payload={
+                    "user_id": user_id,
+                    "fields": explicit_fields,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "binding_mode": "active_profile_slot",
+                },
+                response_payload=payload if isinstance(payload, dict) else None,
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            if not isinstance(payload, dict):
+                return None
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            if not isinstance(data, dict):
+                return None
+            self.invalidate_readiness_cache(user_id)
+            return data
+        except AgentClientError as exc:
+            await self._record_agent_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="collect_from_chat",
+                request_method="POST",
+                request_path="/api/v1/profiles/collect-from-chat",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload={
+                    "user_id": user_id,
+                    "fields": explicit_fields,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "binding_mode": "active_profile_slot",
+                },
+                latency_ms=self._elapsed_ms(started_at),
+                retry_of_log_id=retry_of_log_id,
+            )
+            logger.warning(
+                "profile_slot_persist_from_chat_failed",
                 user_id=user_id,
                 chat_id=chat_id,
                 message_id=message_id,
@@ -811,6 +1005,16 @@ class ProfileGateService:
                     set_candidate("current_degree_level", normalized, 0.9, "current_degree_context", source_span=needle)
                     break
 
+        bare_degree = cls._extract_bare_degree_level_candidate(lowered, degree_map)
+        if (
+            bare_degree
+            and "current_degree_level" in missing
+            and "target_degree_level" in missing
+            and "current_degree_level" not in extracted
+            and "target_degree_level" not in extracted
+        ):
+            set_candidate("current_degree_level", bare_degree, 0.88, "bare_degree_answer", source_span=text)
+
         if "target_degree_level" in missing and "target_degree_level" not in extracted:
             for needle, normalized in degree_map.items():
                 if re.search(
@@ -822,8 +1026,7 @@ class ProfileGateService:
                     break
 
             if "target_degree_level" not in extracted:
-                bare_degree = cls._extract_bare_degree_level_candidate(lowered, degree_map)
-                if bare_degree:
+                if bare_degree and "current_degree_level" not in extracted:
                     set_candidate("target_degree_level", bare_degree, 0.88, "bare_degree_answer", source_span=text)
 
         corrected_study_field = cls._extract_inline_correction_value(text)

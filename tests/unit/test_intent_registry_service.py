@@ -31,6 +31,14 @@ def test_detect_intent_program_discovery_from_discover_phrase():
     assert intent == "program_discovery"
 
 
+def test_detect_intent_program_discovery_from_discover_degree_phrase():
+    service = IntentRegistryService()
+
+    intent = service.detect_intent("I want to discover some master degree options")
+
+    assert intent == "program_discovery"
+
+
 def test_detect_intent_profile_completion_for_cv_upload():
     service = IntentRegistryService()
 

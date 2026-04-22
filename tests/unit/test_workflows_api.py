@@ -60,7 +60,6 @@ def _stub_student_profile_client():
             assert _kwargs["file_content_base64"]
             assert _kwargs["intent"] == "profile_completion"
             assert _kwargs["document_type"] == "cv"
-            assert _kwargs["target_degree_hint"] == "master"
             assert _kwargs["run_gap_analysis"] is True
             return {
                 "profile_id": "profile-1",
@@ -486,7 +485,6 @@ def test_profile_upload_forwards_to_student_profile():
         data={
             "intent": "profile_completion",
             "document_type": "cv",
-            "target_degree_hint": "master",
             "run_gap_analysis": "true",
         },
     )

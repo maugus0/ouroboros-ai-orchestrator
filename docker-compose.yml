@@ -1,14 +1,18 @@
-version: '3.8'
-
 services:
   mysql:
     image: mysql:8.0
     container_name: orchestrator-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
       MYSQL_DATABASE: ${DB_NAME:-ouroboros_orchestrator_db}
+      MYSQL_USER: ${APP_DB_USERNAME:-ouroboros_app}
+      MYSQL_PASSWORD: ${APP_DB_PASSWORD:-app_password}
     ports:
       - "${DOCKER_MYSQL_PORT:-3307}:3306"
+    networks:
+      ouroboros-net:
+        aliases:
+          - orchestrator-mysql
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -25,17 +29,31 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    networks:
+      - ouroboros-net
+    env_file:
+      - .env
     environment:
-      - DB_HOST=mysql
+      - DB_HOST=orchestrator-mysql
       - DB_PORT=3306
       - DB_NAME=${DB_NAME:-ouroboros_orchestrator_db}
-      - DB_USERNAME=root
-      - DB_PASSWORD=${DB_PASSWORD:-root_password}
+      - DB_USERNAME=${APP_DB_USERNAME:-ouroboros_app}
+      - DB_PASSWORD=${APP_DB_PASSWORD:-app_password}
+      - MYSQL_HOST=orchestrator-mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=${DB_NAME:-ouroboros_orchestrator_db}
+      - MYSQL_USER=${APP_DB_USERNAME:-ouroboros_app}
+      - MYSQL_PASSWORD=${APP_DB_PASSWORD:-app_password}
+      - APPLICATION_SUPPORT_SERVICE_URL=${APPLICATION_SUPPORT_SERVICE_URL:-http://application-support:8005}
       - ALLOW_DB_FAILURE=false
       - LOG_LEVEL=DEBUG
     volumes:
       - .:/app
-    command: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: ./start.sh
 
 volumes:
   mysql_data:
+
+networks:
+  ouroboros-net:
+    name: ${OUROBOROS_DOCKER_NETWORK:-ouroboros-net}

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.clients.agent_client import AgentClientError
 from app.services.chat_service import ChatService
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -92,6 +93,26 @@ def mock_program_discovery_client():
 
 
 @pytest.fixture
+def mock_application_support_client():
+    """Create a mock application-support client."""
+    client = MagicMock()
+    client.generate_sop = AsyncMock(return_value={"data": {"content": "Generated SOP content"}})
+    client.generate_cover_letter = AsyncMock(return_value={"data": {"content": "Generated cover letter"}})
+    client.create_checklist = AsyncMock(
+        return_value={
+            "data": {
+                "items": [
+                    {"description": "Prepare SOP"},
+                    {"description": "Request recommendation letters"},
+                ]
+            }
+        }
+    )
+    client.list_deadlines = AsyncMock(return_value={"data": []})
+    return client
+
+
+@pytest.fixture
 def chat_service(
     mock_chat_repo,
     mock_message_repo,
@@ -100,6 +121,7 @@ def chat_service(
     mock_intent_registry_service,
     mock_agent_availability_service,
     mock_program_discovery_client,
+    mock_application_support_client,
 ):
     """Create ChatService with mocked repositories."""
     ChatService._RESPONSE_CACHE.clear()
@@ -111,6 +133,7 @@ def chat_service(
         intent_registry_service=mock_intent_registry_service,
         agent_availability_service=mock_agent_availability_service,
         program_discovery_client=mock_program_discovery_client,
+        application_support_client=mock_application_support_client,
     )
 
 
@@ -758,6 +781,133 @@ async def test_send_message_mapped_intent_with_unavailable_agent_returns_unavail
     assert "service is temporarily unavailable" in assistant_kwargs["content"]
     assert "scholarship-discovery" in assistant_kwargs["content"]
     assert assistant_kwargs["metadata"]["profile_gate"]["reason"] == "intent_agent_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_send_message_application_support_intent_calls_client(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+    mock_application_support_client,
+):
+    """Application-planning turns should delegate to application-support once the gate passes."""
+    chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "application-support"}
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "optional_missing_fields": [],
+        "updated_at": "2026-04-12T00:00:00",
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "application_planning",
+        "missing_required_fields": [],
+        "missing_optional_fields": [],
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Write an SOP for NUS Master of Computing",
+    )
+
+    mock_application_support_client.generate_sop.assert_awaited_once()
+    call_args = mock_application_support_client.generate_sop.await_args
+    assert call_args.args[0] == "user-456"
+    assert call_args.args[1]["target_program"]["program_name"] == "NUS Master of Computing"
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["content"] == "Generated SOP content"
+
+
+@pytest.mark.asyncio
+async def test_send_message_application_support_missing_sop_context_asks_for_target(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+    mock_application_support_client,
+):
+    """SOP requests without target context should not call downstream with invalid payloads."""
+    chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "application-support"}
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "optional_missing_fields": [],
+        "updated_at": "2026-04-12T00:00:00",
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "application_planning",
+        "missing_required_fields": [],
+        "missing_optional_fields": [],
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Write my SOP",
+    )
+
+    mock_application_support_client.generate_sop.assert_not_awaited()
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "target university or program" in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_application_support_failure_returns_graceful_response(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+    mock_application_support_client,
+):
+    """Downstream application-support failures should not crash the chat turn."""
+    chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "application-support"}
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "optional_missing_fields": [],
+        "updated_at": "2026-04-12T00:00:00",
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "application_planning",
+        "missing_required_fields": [],
+        "missing_optional_fields": [],
+    }
+    mock_application_support_client.create_checklist.side_effect = AgentClientError(
+        service_name="application-support",
+        message="application-support request failed",
+        status_code=503,
+    )
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Create an application checklist for NUS",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "application-support service is temporarily unavailable" in assistant_kwargs["content"]
 
 
 @pytest.mark.asyncio

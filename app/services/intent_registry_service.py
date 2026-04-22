@@ -101,17 +101,26 @@ class IntentRegistryService:
 
         if any(token in lowered for token in ["scholarship", "funding", "grant", "financial aid"]):
             return "scholarship_search"
+        if any(
+            token in lowered
+            for token in [
+                "sop",
+                "statement of purpose",
+                "personal statement",
+                "cover letter",
+                "checklist",
+                "deadline",
+                "application plan",
+                "application timeline",
+            ]
+        ):
+            return "application_planning"
         if any(token in lowered for token in ["program", "major", "course", "university", "school"]):
             if any(token in lowered for token in ["apply", "application", "deadline", "requirements"]):
                 return "apply_to_named_school"
             return "program_discovery"
         if any(token in lowered for token in ["eligible", "eligibility", "qualify", "qualified", "requirements"]):
             return "eligibility_check"
-        if any(
-            token in lowered
-            for token in ["application plan", "application timeline", "statement of purpose", "cover letter"]
-        ):
-            return "application_planning"
         if any(
             token in lowered
             for token in ["cv", "resume", "upload", "transcript", "document", "processing", "analysis", "feedback"]

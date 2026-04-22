@@ -15,6 +15,7 @@ import aiomysql
 from fastapi import HTTPException, status
 
 from app.clients.agent_client import AgentClientError
+from app.clients.application_support_client import ApplicationSupportClient
 from app.clients.program_discovery_client import ProgramDiscoveryClient
 from app.core.database import get_pool
 from app.core.logging import get_logger
@@ -68,6 +69,10 @@ def _lazy_program_discovery_client() -> ProgramDiscoveryClient:
     return ProgramDiscoveryClient()
 
 
+def _lazy_application_support_client() -> ApplicationSupportClient:
+    return ApplicationSupportClient()
+
+
 def _as_string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item is not None]
@@ -94,6 +99,7 @@ class ChatService:
         intent_registry_service: Optional[IntentRegistryService] = None,
         agent_availability_service: Optional[AgentAvailabilityService] = None,
         program_discovery_client: Optional[ProgramDiscoveryClient] = None,
+        application_support_client: Optional[ApplicationSupportClient] = None,
     ) -> None:
         self._chat_repo = chat_repo
         self._message_repo = message_repo
@@ -104,6 +110,7 @@ class ChatService:
         self._intent_registry_service = intent_registry_service
         self._agent_availability_service = agent_availability_service
         self._program_discovery_client = program_discovery_client
+        self._application_support_client = application_support_client
 
     @classmethod
     def _build_response_cache_key(
@@ -217,6 +224,12 @@ class ChatService:
         if self._program_discovery_client is None:
             self._program_discovery_client = _lazy_program_discovery_client()
         return self._program_discovery_client
+
+    @property
+    def application_support_client(self) -> ApplicationSupportClient:
+        if self._application_support_client is None:
+            self._application_support_client = _lazy_application_support_client()
+        return self._application_support_client
 
     # -- Public API --
 
@@ -486,11 +499,20 @@ class ChatService:
                     if gate["allowed"]:
                         if target_agent == "program-discovery":
                             await self._attempt_program_discovery_probe(user_id=user_id, chat_id=chat_id)
-                        assistant_content = self._build_intent_ready_response(
-                            detected_intent,
-                            content,
-                            gate,
-                        )
+                        if target_agent == "application-support":
+                            assistant_content = await self._build_application_support_response(
+                                user_id=user_id,
+                                chat_id=chat_id,
+                                user_message=content,
+                                detected_intent=detected_intent,
+                                trace_id=workflow_run_id,
+                            )
+                        else:
+                            assistant_content = self._build_intent_ready_response(
+                                detected_intent,
+                                content,
+                                gate,
+                            )
                     else:
                         assistant_content = self._build_profile_gate_response(
                             _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or []),
@@ -969,6 +991,176 @@ class ChatService:
             f"I understood this as {intent_label}, but that service is temporarily unavailable right now "
             f"({target_agent}). Please try again shortly."
         )
+
+    @staticmethod
+    def _detect_application_support_action(user_message: str) -> str:
+        lowered = (user_message or "").lower()
+        if any(token in lowered for token in ["sop", "statement of purpose", "personal statement"]):
+            return "sop"
+        if "cover letter" in lowered:
+            return "cover_letter"
+        if any(token in lowered for token in ["deadline", "timeline"]):
+            return "deadlines"
+        if any(token in lowered for token in ["checklist", "document list", "application steps", "application plan"]):
+            return "checklist"
+        return "checklist"
+
+    @staticmethod
+    def _extract_target_program_from_message(user_message: str) -> Optional[str]:
+        clean_message = re.sub(r"\s+", " ", (user_message or "").strip())
+        if not clean_message:
+            return None
+
+        patterns = [
+            r"\b(?:for|at|to)\s+(.+)$",
+            r"\b(?:university|school|program)\s*[:=-]\s*(.+)$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, clean_message, flags=re.IGNORECASE)
+            if match:
+                candidate = re.sub(r"[?.!]+$", "", match.group(1).strip())
+                if candidate:
+                    return candidate[:180]
+        return None
+
+    @staticmethod
+    def _application_support_unavailable_response() -> str:
+        return (
+            "I understood this as an application-support task, but the application-support service "
+            "is temporarily unavailable right now. Please try again shortly."
+        )
+
+    def _format_application_support_response(self, action: str, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return "Application support completed the request, but returned an unexpected response."
+
+        data = payload.get("data")
+        message = str(payload.get("message") or "Application support completed the request.")
+
+        if action in {"sop", "cover_letter"} and isinstance(data, dict):
+            content = str(data.get("content") or "").strip()
+            if content:
+                return content
+
+        if action == "checklist":
+            checklist = data if isinstance(data, dict) else None
+            if checklist is None and isinstance(data, list) and data:
+                checklist = data[0] if isinstance(data[0], dict) else None
+            if isinstance(checklist, dict):
+                items = checklist.get("items") or []
+                if isinstance(items, list) and items:
+                    lines = []
+                    for item in items[:6]:
+                        if isinstance(item, dict) and item.get("description"):
+                            lines.append(f"- {item['description']}")
+                    if lines:
+                        return "Here is the current application checklist:\n" + "\n".join(lines)
+            return message
+
+        if action == "deadlines" and isinstance(data, list):
+            if not data:
+                return "I checked your application deadlines and did not find any saved deadlines yet."
+            lines = []
+            for item in data[:6]:
+                if not isinstance(item, dict):
+                    continue
+                date_text = item.get("deadline_date") or "date pending"
+                description = item.get("item_description") or "Application deadline"
+                lines.append(f"- {date_text}: {description}")
+            if lines:
+                return "Here are the application deadlines I found:\n" + "\n".join(lines)
+
+        return message
+
+    async def _build_application_support_response(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        user_message: str,
+        detected_intent: str,
+        trace_id: str,
+    ) -> str:
+        """Delegate application-planning requests to application-support."""
+        action = self._detect_application_support_action(user_message)
+        target_program = self._extract_target_program_from_message(user_message)
+
+        try:
+            if action == "sop":
+                if not target_program:
+                    return (
+                        "I can draft a Statement of Purpose, but I need the target university or program first. "
+                        "Please send the program name and any requirements you want me to reflect."
+                    )
+                payload = {
+                    "user_id": user_id,
+                    "target_program": {"program_name": target_program},
+                    "user_preferences": {"source_message": user_message, "intent": detected_intent},
+                }
+                result = await self.application_support_client.generate_sop(
+                    user_id,
+                    payload,
+                    trace_id=trace_id,
+                    session_id=chat_id,
+                )
+                return self._format_application_support_response(action, result)
+
+            if action == "cover_letter":
+                payload = {
+                    "user_id": user_id,
+                    "target_type": "program",
+                    "target_details": {
+                        "name": target_program or "target program",
+                        "source_message": user_message,
+                    },
+                }
+                result = await self.application_support_client.generate_cover_letter(
+                    user_id,
+                    payload,
+                    trace_id=trace_id,
+                    session_id=chat_id,
+                )
+                return self._format_application_support_response(action, result)
+
+            if action == "deadlines":
+                result = await self.application_support_client.list_deadlines(
+                    user_id,
+                    trace_id=trace_id,
+                    session_id=chat_id,
+                )
+                return self._format_application_support_response(action, result)
+
+            payload = {
+                "user_id": user_id,
+                "program_requirements": user_message,
+                "target_program": {"program_name": target_program} if target_program else {},
+            }
+            result = await self.application_support_client.create_checklist(
+                user_id,
+                payload,
+                trace_id=trace_id,
+                session_id=chat_id,
+            )
+            return self._format_application_support_response(action, result)
+        except AgentClientError as exc:
+            logger.warning(
+                "application_support_request_failed",
+                user_id=user_id,
+                chat_id=chat_id,
+                action=action,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return self._application_support_unavailable_response()
+        except (RuntimeError, ValueError, TypeError) as exc:
+            logger.warning(
+                "application_support_request_unavailable",
+                user_id=user_id,
+                chat_id=chat_id,
+                action=action,
+                error=str(exc),
+            )
+            return self._application_support_unavailable_response()
 
     def _build_intent_ready_response(
         self,

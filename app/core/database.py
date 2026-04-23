@@ -4,7 +4,7 @@ Raw SQL queries — no ORM.
 """
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 import aiomysql
 
@@ -29,7 +29,7 @@ class _PoolHolder:
     """Module-level pool storage without ``global`` statements."""
 
     __slots__ = ()
-    pool: ClassVar[aiomysql.Pool | None] = None
+    pool: ClassVar[Optional[aiomysql.Pool]] = None
 
 
 async def create_pool(config: PoolConfig) -> aiomysql.Pool:

@@ -1340,13 +1340,32 @@ class ResultAggregationService:
             return value
         normalized = value.strip().lower().replace("_", " ")
         mapping = {
+            # Bachelor variations
             "bachelor": "bachelors",
             "bachelors": "bachelors",
+            "bachelor degree": "bachelors",
+            "bachelors degree": "bachelors",
+            "bachelor's": "bachelors",
+            "bachelor's degree": "bachelors",
             "undergraduate": "bachelors",
+            "undergrad": "bachelors",
+            # Master variations
             "master": "masters",
             "masters": "masters",
+            "master degree": "masters",
+            "masters degree": "masters",
+            "master's": "masters",
+            "master's degree": "masters",
+            "postgraduate": "masters",
+            "graduate": "masters",
+            # PhD variations
             "phd": "phd",
+            "ph.d": "phd",
+            "ph.d.": "phd",
             "doctorate": "phd",
+            "doctoral": "phd",
+            "doctor": "phd",
+            # Other
             "diploma": "diploma",
             "certificate": "certificate",
         }

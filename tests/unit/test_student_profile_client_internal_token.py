@@ -62,3 +62,27 @@ async def test_explicit_authorization_takes_precedence(monkeypatch):
 
     assert captured["authorization"] == "Bearer upstream-token"
     assert not stub_issuer.calls
+
+
+@pytest.mark.asyncio
+async def test_get_profile_uses_internal_token_when_enabled(monkeypatch):
+    stub_issuer = _StubIssuer()
+    client = StudentProfileClient(internal_token_issuer=stub_issuer)
+
+    monkeypatch.setattr(settings, "INTERNAL_TOKEN_ENABLED", True)
+
+    captured = {}
+
+    async def _stub_request(_self, method, path, **kwargs):
+        captured["method"] = method
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"data": {"id": "profile-1"}}
+
+    monkeypatch.setattr(StudentProfileClient, "request", _stub_request)
+
+    await client.get_profile("profile-1", user_id="user-1", session_id="chat-1", trace_id="trace-1")
+
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/api/v1/profiles/profile-1"
+    assert captured["authorization"] == "Bearer internal-token"

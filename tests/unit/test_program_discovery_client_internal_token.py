@@ -62,3 +62,46 @@ async def test_probe_health_honors_explicit_authorization(monkeypatch):
 
     assert captured["authorization"] == "Bearer upstream-token"
     assert not stub_issuer.calls
+
+
+@pytest.mark.asyncio
+async def test_rank_programs_sends_contract_payload(monkeypatch):
+    stub_issuer = _StubIssuer()
+    client = ProgramDiscoveryClient(internal_token_issuer=stub_issuer)
+    monkeypatch.setattr(settings, "INTERNAL_TOKEN_ENABLED", True)
+
+    captured = {}
+
+    async def _stub_request(_self, method, path, **kwargs):
+        captured["method"] = method
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"data": []}
+
+    monkeypatch.setattr(ProgramDiscoveryClient, "request", _stub_request)
+
+    await client.rank_programs(
+        student_profile={"gpa": 3.7},
+        target_field="Computer Science",
+        target_degree="master",
+        country_preferences=["Singapore"],
+        max_tuition_usd=40000,
+        deadline_cutoff="2027-01-01",
+        limit=5,
+        user_id="user-1",
+        trace_id="trace-1",
+        session_id="chat-1",
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/programs/rank"
+    assert captured["authorization"] == "Bearer internal-token"
+    assert captured["json"] == {
+        "student_profile": {"gpa": 3.7},
+        "target_field": "Computer Science",
+        "target_degree": "master",
+        "country_preferences": ["Singapore"],
+        "max_tuition_usd": 40000,
+        "deadline_cutoff": "2027-01-01",
+        "limit": 5,
+    }

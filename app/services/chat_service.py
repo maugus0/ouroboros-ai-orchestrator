@@ -2,6 +2,7 @@
 
 # pylint: disable=too-many-lines
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -22,6 +23,7 @@ from app.clients.program_discovery_client import ProgramDiscoveryClient
 from app.clients.scholarship_discovery_client import ScholarshipDiscoveryClient
 from app.core.database import get_pool
 from app.core.logging import get_logger
+from app.models.results import DiscoverRequest
 from app.repositories.agent_call_log_repo import AgentCallLogRepository
 from app.repositories.chat_repo import ChatRepository
 from app.repositories.message_repo import MessageRepository
@@ -32,6 +34,7 @@ from app.services.agent_availability_service import AgentAvailabilityService
 from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS, detect_application_support_action
 from app.services.intent_registry_service import IntentRegistryService
 from app.services.profile_gate_service import ProfileGateService
+from app.services.result_aggregation_service import ResultAggregationService
 
 logger = get_logger(__name__)
 
@@ -82,6 +85,10 @@ def _lazy_application_support_client() -> ApplicationSupportClient:
     return ApplicationSupportClient()
 
 
+def _lazy_result_aggregation_service() -> ResultAggregationService:
+    return ResultAggregationService()
+
+
 def _as_string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item is not None]
@@ -90,14 +97,14 @@ def _as_string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
-class ChatService:
+class ChatService:  # pylint: disable=too-many-public-methods
     """Orchestrates chat session operations."""
 
     _RESPONSE_CACHE_TTL_SECONDS = 90
     _RESPONSE_CACHE_MAX_ENTRIES = 256
     _RESPONSE_CACHE: OrderedDict[tuple[str, str], tuple[float, dict[str, Any]]] = OrderedDict()
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         chat_repo: Optional[ChatRepository] = None,
         message_repo: Optional[MessageRepository] = None,
@@ -110,6 +117,7 @@ class ChatService:
         program_discovery_client: Optional[ProgramDiscoveryClient] = None,
         scholarship_discovery_client: Optional[ScholarshipDiscoveryClient] = None,
         application_support_client: Optional[ApplicationSupportClient] = None,
+        result_aggregation_service: Optional[ResultAggregationService] = None,
     ) -> None:
         self._chat_repo = chat_repo
         self._message_repo = message_repo
@@ -122,6 +130,7 @@ class ChatService:
         self._program_discovery_client = program_discovery_client
         self._scholarship_discovery_client = scholarship_discovery_client
         self._application_support_client = application_support_client
+        self._result_aggregation_service = result_aggregation_service
 
     @classmethod
     def _build_response_cache_key(
@@ -247,6 +256,12 @@ class ChatService:
         if self._application_support_client is None:
             self._application_support_client = _lazy_application_support_client()
         return self._application_support_client
+
+    @property
+    def result_aggregation_service(self) -> ResultAggregationService:
+        if self._result_aggregation_service is None:
+            self._result_aggregation_service = _lazy_result_aggregation_service()
+        return self._result_aggregation_service
 
     # -- Public API --
 
@@ -1044,6 +1059,258 @@ class ChatService:
                 "source": "program_discovery",
             }
 
+    async def _handle_result_aggregation_discovery(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        detected_intent: str,
+    ) -> str:
+        """Run the shared aggregation pipeline so chat and dashboard use the same results."""
+        started_at = time.perf_counter()
+        request = self._build_discover_request_from_chat(content)
+        try:
+            result = await self.result_aggregation_service.discover(
+                user_id=user_id,
+                request=request,
+                trace_id=workflow_run_id,
+            )
+            await self._record_program_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                target_service="orchestrator",
+                operation="result_aggregation_discover",
+                request_method="POST",
+                request_path="/api/v1/discover",
+                call_status="success",
+                request_payload=request.model_dump(),
+                response_payload=self._truncate_response_for_logging(result),
+                latency_ms=self._elapsed_ms(started_at),
+            )
+            dashboard = result.get("dashboard") if isinstance(result, dict) else None
+            if isinstance(dashboard, dict):
+                return self._format_aggregation_chat_response(
+                    dashboard=dashboard,
+                    detected_intent=detected_intent,
+                )
+            return "I ran discovery and saved the latest results to your dashboard."
+        except AgentClientError as exc:
+            await self._record_program_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                target_service="orchestrator",
+                operation="result_aggregation_discover",
+                request_method="POST",
+                request_path="/api/v1/discover",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload=request.model_dump(),
+                latency_ms=self._elapsed_ms(started_at),
+            )
+            logger.error(
+                "result_aggregation_discovery_failed",
+                user_id=user_id,
+                chat_id=chat_id,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return (
+                "I tried to run discovery for your dashboard, but one of the discovery agents "
+                "encountered an issue. Please try again in a moment."
+            )
+
+    async def _save_discovery_to_dashboard_async(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        detected_intent: str,
+    ) -> None:
+        """Background task to save discovery results to dashboard.
+
+        Runs asynchronously without blocking the chat response.
+        This ensures users see the same results in both chat and dashboard.
+        """
+        try:
+            await self._handle_result_aggregation_discovery(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                detected_intent=detected_intent,
+            )
+            logger.info(
+                "dashboard_save_completed",
+                user_id=user_id,
+                chat_id=chat_id,
+                intent=detected_intent,
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Don't let dashboard save failures affect chat response
+            logger.warning(
+                "dashboard_save_failed_non_blocking",
+                error=str(exc),
+                user_id=user_id,
+                chat_id=chat_id,
+                intent=detected_intent,
+            )
+
+    @classmethod
+    def _build_discover_request_from_chat(cls, content: str) -> DiscoverRequest:
+        lowered = f" {content.lower()} "
+        return DiscoverRequest(
+            query=content,
+            target_field=cls._extract_target_field(lowered),
+            target_degree=cls._extract_target_degree(lowered),
+            countries=cls._extract_country_preferences(lowered),
+            limit=10,
+            include_attribution=True,
+            force_refresh=True,
+        )
+
+    @staticmethod
+    def _extract_country_preferences(lowered: str) -> list[str]:
+        country_patterns = [
+            ("singapore", "Singapore"),
+            ("united kingdom", "United Kingdom"),
+            (" uk ", "United Kingdom"),
+            ("u.k.", "United Kingdom"),
+            ("england", "United Kingdom"),
+            ("united states", "United States"),
+            (" usa ", "United States"),
+            ("u.s.", "United States"),
+            ("canada", "Canada"),
+            ("australia", "Australia"),
+        ]
+        return [country for token, country in country_patterns if token in lowered]
+
+    @staticmethod
+    def _extract_target_degree(lowered: str) -> Optional[str]:
+        if any(token in lowered for token in ("phd", "ph.d", "doctorate", "doctoral")):
+            return "phd"
+        if any(token in lowered for token in ("master", "masters", "msc", "ms ", "graduate")):
+            return "master"
+        if any(token in lowered for token in ("bachelor", "undergraduate")):
+            return "bachelor"
+        return None
+
+    @staticmethod
+    def _extract_target_field(lowered: str) -> Optional[str]:
+        if any(token in lowered for token in ("artificial intelligence", "machine learning", " ai ")):
+            return "Artificial Intelligence"
+        if "data science" in lowered:
+            return "Data Science"
+        if any(token in lowered for token in ("computer science", "computing", " cs ")):
+            return "Computer Science"
+        if "business" in lowered or "mba" in lowered:
+            return "Business"
+        if "engineering" in lowered:
+            return "Engineering"
+        return None
+
+    def _format_aggregation_chat_response(self, *, dashboard: dict[str, Any], detected_intent: str) -> str:
+        programs = self._dashboard_items(dashboard, "programs")
+        scholarships = self._dashboard_items(dashboard, "scholarships")
+        errors = dashboard.get("errors") if isinstance(dashboard.get("errors"), list) else []
+
+        lines = ["I ran discovery and saved these results to your dashboard."]
+        if detected_intent == "scholarship_search":
+            lines.extend(self._format_scholarship_section(scholarships))
+            lines.extend(self._format_program_section(programs))
+        else:
+            lines.extend(self._format_program_section(programs))
+            lines.extend(self._format_scholarship_section(scholarships))
+
+        if errors:
+            first_error = errors[0] if isinstance(errors[0], dict) else {}
+            message = first_error.get("message") if isinstance(first_error, dict) else None
+            if message:
+                lines.append(f"\nNote: one agent returned a partial result: {message}")
+
+        lines.append("\nOpen the Programs or Scholarships tab to view the same saved results.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _dashboard_items(dashboard: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        section = dashboard.get(key)
+        if isinstance(section, dict) and isinstance(section.get("items"), list):
+            return [item for item in section["items"] if isinstance(item, dict)]
+        return []
+
+    def _format_program_section(self, programs: list[dict[str, Any]]) -> list[str]:
+        if not programs:
+            return ["\nPrograms: no matched programs found in the latest discovery run."]
+
+        lines = ["\nPrograms:"]
+        for index, program in enumerate(programs[:5], start=1):
+            name = self._first_text(program.get("program_name"), program.get("name"), "Unnamed program")
+            institution = self._first_text(
+                program.get("institution_name"),
+                program.get("university"),
+                program.get("provider"),
+                "Unknown institution",
+            )
+            country = self._first_text(program.get("institution_country"), program.get("country"), "")
+            score = self._format_score(program.get("match"))
+            suffix = f" - {score}" if score else ""
+            location = f", {country}" if country else ""
+            lines.append(f"{index}. {name} - {institution}{location}{suffix}")
+        return lines
+
+    def _format_scholarship_section(self, scholarships: list[dict[str, Any]]) -> list[str]:
+        if not scholarships:
+            return ["\nScholarships: no matched scholarships found in the latest discovery run."]
+
+        lines = ["\nScholarships:"]
+        for index, scholarship in enumerate(scholarships[:5], start=1):
+            name = self._first_text(scholarship.get("name"), scholarship.get("title"), "Unnamed scholarship")
+            provider = self._first_text(scholarship.get("provider"), scholarship.get("organization"), "")
+            amount = self._format_amount(scholarship)
+            score = self._format_score(scholarship.get("match"))
+            details = [value for value in (provider, amount, score) if value]
+            suffix = f" - {'; '.join(details)}" if details else ""
+            lines.append(f"{index}. {name}{suffix}")
+        return lines
+
+    @staticmethod
+    def _first_text(*values: Any) -> str:
+        fallback = ""
+        if values:
+            fallback = str(values[-1]) if values[-1] is not None else ""
+        for value in values[:-1]:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return fallback
+
+    @staticmethod
+    def _format_score(match: Any) -> Optional[str]:
+        if not isinstance(match, dict):
+            return None
+        try:
+            score = float(match.get("match_score"))
+        except (TypeError, ValueError):
+            return None
+        return f"{round(score)}% match"
+
+    @staticmethod
+    def _format_amount(scholarship: dict[str, Any]) -> Optional[str]:
+        amount = scholarship.get("funding_amount")
+        if isinstance(amount, (int, float)):
+            currency = scholarship.get("currency") if isinstance(scholarship.get("currency"), str) else "USD"
+            return f"{currency} {amount:,.0f}"
+        raw_amount = scholarship.get("amount")
+        if isinstance(raw_amount, str) and raw_amount.strip():
+            return raw_amount.strip()
+        return None
+
     async def _record_program_discovery_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         *,
@@ -1054,6 +1321,7 @@ class ChatService:
         request_method: Optional[str],
         request_path: Optional[str],
         call_status: str,
+        target_service: str = "program-discovery",
         http_status: Optional[int] = None,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
@@ -1071,7 +1339,7 @@ class ChatService:
                 workflow_run_id=workflow_run_id,
                 user_id=user_id,
                 chat_id=chat_id,
-                target_service="program-discovery",
+                target_service=target_service,
                 operation=operation,
                 request_method=request_method,
                 request_path=request_path,
@@ -2192,23 +2460,50 @@ class ChatService:
         Returns:
             Dict with 'answer' (str) and optional 'agent_reasoning' (dict).
         """
-        if target_agent == "program-discovery" and detected_intent == "program_discovery":
-            return await self._handle_program_discovery(
+        # HYBRID APPROACH: Use ORB-32's rich handlers for chat response,
+        # then save to dashboard asynchronously for consistent UX
+        if detected_intent == "program_discovery":
+            # Get rich response with agent_reasoning from ORB-32's handler
+            pda_result = await self._handle_program_discovery(
                 user_id=user_id,
                 chat_id=chat_id,
                 content=content,
                 workflow_run_id=workflow_run_id,
                 gate=gate,
             )
-        if target_agent == "scholarship-discovery" and detected_intent == "scholarship_search":
-            # _handle_scholarship_search now returns dict with answer, agent_reasoning, source
-            return await self._handle_scholarship_search(
+            # Also save to dashboard (background task - don't block response)
+            asyncio.create_task(
+                self._save_discovery_to_dashboard_async(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    content=content,
+                    workflow_run_id=workflow_run_id,
+                    detected_intent=detected_intent,
+                )
+            )
+            return pda_result
+
+        if detected_intent == "scholarship_search":
+            # Get rich response with agent_reasoning from ORB-32's handler
+            sda_result = await self._handle_scholarship_search(
                 user_id=user_id,
                 chat_id=chat_id,
                 content=content,
                 workflow_run_id=workflow_run_id,
                 gate=gate,
             )
+            # Also save to dashboard (background task - don't block response)
+            asyncio.create_task(
+                self._save_discovery_to_dashboard_async(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    content=content,
+                    workflow_run_id=workflow_run_id,
+                    detected_intent=detected_intent,
+                )
+            )
+            return sda_result
+
         if target_agent == "application-support":
             result = await self._build_application_support_response(
                 user_id=user_id,

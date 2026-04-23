@@ -65,6 +65,7 @@ class ApplicationSupportClient(AgentClient):
                 session_id=session_id,
                 trace_id=trace_id,
             ),
+            timeout_seconds=float(settings.APPLICATION_SUPPORT_GENERATION_TIMEOUT),
         )
 
     async def generate_cover_letter(
@@ -90,6 +91,7 @@ class ApplicationSupportClient(AgentClient):
                 session_id=session_id,
                 trace_id=trace_id,
             ),
+            timeout_seconds=float(settings.APPLICATION_SUPPORT_GENERATION_TIMEOUT),
         )
 
     async def create_checklist(

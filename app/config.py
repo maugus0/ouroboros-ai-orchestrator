@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     AGENT_CALL_TIMEOUT: int = 30
     AGENT_CALL_RETRIES: int = 2
     AGENT_CALL_BACKOFF_FACTOR: float = 1.0
+    APPLICATION_SUPPORT_GENERATION_TIMEOUT: int = 90
 
     # ---------- Application ----------
     LOG_LEVEL: str = "INFO"

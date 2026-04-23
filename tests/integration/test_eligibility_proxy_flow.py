@@ -17,17 +17,29 @@ def _override_current_user_id() -> str:
     return "11111111-1111-1111-1111-111111111111"
 
 
+def _get_required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        pytest.skip(f"{name} is not set; skipping eligibility proxy smoke test")
+    return value
+
+
+def _skip_if_downstream_unavailable(response, step: str) -> None:
+    if response.status_code in (502, 504):
+        pytest.skip(f"Eligibility engine unavailable during {step}: {response.text}")
+
+
 def _build_proxy_test_app(monkeypatch):
     """Create a small app that exercises the real eligibility proxy router."""
+    if os.getenv("RUN_INTEGRATION_TESTS") != "true":
+        pytest.skip("RUN_INTEGRATION_TESTS=true is required for eligibility proxy smoke test")
+
     app = FastAPI()
     app.include_router(eligibility_api.router)
     app.dependency_overrides[get_current_user_id] = _override_current_user_id
 
-    service_token = os.getenv(
-        "X_SERVICE_TOKEN",
-        "ouroboros-ai-service-token-2024-secure-change-in-production",
-    )
-    eligibility_base_url = os.getenv("ELIGIBILITY_PROXY_TEST_URL", "http://localhost:8004")
+    service_token = _get_required_env("X_SERVICE_TOKEN")
+    eligibility_base_url = _get_required_env("ELIGIBILITY_PROXY_TEST_URL")
     real_service = EligibilityService(
         client=EligibilityClient(
             base_url=eligibility_base_url,
@@ -73,9 +85,7 @@ def test_proxy_evaluate_and_fetch_results_against_real_eligibility_engine(monkey
         },
     )
 
-    if evaluate_response.status_code in (502, 504):
-        pytest.skip(f"Eligibility engine unavailable for smoke test: {evaluate_response.text}")
-
+    _skip_if_downstream_unavailable(evaluate_response, "evaluate")
     assert evaluate_response.status_code == 200
     evaluate_body = evaluate_response.json()
     assert evaluate_body["success"] is True
@@ -88,6 +98,7 @@ def test_proxy_evaluate_and_fetch_results_against_real_eligibility_engine(monkey
         params={"entity_type": "program", "page": 1, "page_size": 10},
         headers={"X-Trace-ID": "proxy-trace-2"},
     )
+    _skip_if_downstream_unavailable(list_response, "list results")
     assert list_response.status_code == 200
     list_body = list_response.json()
     assert list_body["success"] is True
@@ -97,6 +108,7 @@ def test_proxy_evaluate_and_fetch_results_against_real_eligibility_engine(monkey
         f"/api/v1/eligibility/results/{match_result['id']}",
         headers={"X-Trace-ID": "proxy-trace-3"},
     )
+    _skip_if_downstream_unavailable(detail_response, "get result detail")
     assert detail_response.status_code == 200
     detail_body = detail_response.json()
     assert detail_body["success"] is True

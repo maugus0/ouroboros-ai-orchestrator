@@ -13,7 +13,7 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PoolConfig:
     """Parameters for creating the async MySQL connection pool."""
 

@@ -146,18 +146,24 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
         if chat_id:
             notice_content = _build_document_upload_notice(result, document_type, filename)
             notice_title = _build_document_upload_title(document_type, filename)
+            parse_agent_reasoning = None
+            if isinstance(profile_data, dict) and isinstance(profile_data.get("agent_reasoning"), dict):
+                parse_agent_reasoning = _extract_agent_reasoning(profile_data["agent_reasoning"])
+            notice_metadata: dict[str, Any] = {
+                "notice_type": "document_upload",
+                "notice_title": notice_title,
+                "document_type": document_type,
+                "file_name": filename,
+                "intent": intent,
+                "upload_result": result if isinstance(result, dict) else None,
+            }
+            if parse_agent_reasoning:
+                notice_metadata["agent_reasoning"] = parse_agent_reasoning
             await chat_service.post_assistant_notice(
                 user_id=user_id,
                 chat_id=chat_id,
                 content=notice_content,
-                metadata={
-                    "notice_type": "document_upload",
-                    "notice_title": notice_title,
-                    "document_type": document_type,
-                    "file_name": filename,
-                    "intent": intent,
-                    "upload_result": result if isinstance(result, dict) else None,
-                },
+                metadata=notice_metadata,
             )
 
         return result
@@ -196,6 +202,40 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
                     notice_error=str(notice_exc),
                 )
         raise
+
+
+def _extract_agent_reasoning(raw: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist-extract known agent_reasoning fields before persisting to chat metadata.
+
+    The student-profile service already constructs this dict from controlled sources,
+    but we extract only the expected fields to guard against schema drift or unexpected keys.
+    """
+    _max_str = 500
+    _max_list_items = 20
+    _max_item_len = 300
+
+    def _safe_str(value: object) -> str | None:
+        return str(value)[:_max_str] if isinstance(value, str) else None
+
+    def _safe_str_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item)[:_max_item_len] for item in value if isinstance(item, str)][:_max_list_items]
+
+    result: dict[str, Any] = {}
+    approach = _safe_str(raw.get("approach"))
+    if approach:
+        result["approach"] = approach
+    result["decision_factors"] = _safe_str_list(raw.get("decision_factors"))
+    result["parse_decisions"] = _safe_str_list(raw.get("parse_decisions"))
+    result["clarification_reasons"] = _safe_str_list(raw.get("clarification_reasons"))
+    next_field = _safe_str(raw.get("next_field"))
+    if next_field is not None:
+        result["next_field"] = next_field
+    confidence = raw.get("confidence")
+    if isinstance(confidence, (int, float)):
+        result["confidence"] = float(confidence)
+    return result
 
 
 def _build_document_upload_notice(result: dict[str, Any] | None, document_type: str, filename: str) -> str:

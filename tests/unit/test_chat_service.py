@@ -1743,3 +1743,114 @@ def test_generate_placeholder_response(chat_service):
 
     assert "Ouroboros" in response
     assert "scholarships" in response.lower()
+
+
+# ── Explainability Metadata Tests ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_message_metadata_includes_orchestrator_thoughts_gate_decision_routing_decision(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """orchestrator_thoughts, gate_decision, and routing_decision must be present
+    in the assistant message metadata on every successful send_message turn."""
+    chat_service.intent_registry_service.detect_intent.return_value = "program_discovery"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "program-discovery"}
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "missing_required_fields": [],
+        "missing_optional_fields": [],
+        "updated_at": "2026-04-12T00:00:00",
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+        "intent": "program_discovery",
+    }
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Find programs in Singapore",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    meta = assistant_kwargs["metadata"]
+
+    # orchestrator_thoughts shape
+    ot = meta["orchestrator_thoughts"]
+    assert ot["intent"] == "program_discovery"
+    assert isinstance(ot["intent_confidence"], float)
+    assert "reasoning" not in ot
+
+    # gate_decision shape
+    gd = meta["gate_decision"]
+    assert gd["allowed"] is True
+    assert gd["status"] == "COMPLETE"
+    assert isinstance(gd["missing_fields"], list)
+    assert isinstance(gd["reason"], str)
+
+    # routing_decision shape
+    rd = meta["routing_decision"]
+    assert rd["selected_agent"] == "program-discovery"
+    assert isinstance(rd["routing_reason"], str)
+    assert isinstance(rd["confidence"], float)
+    assert isinstance(rd["alternative_agents"], list)
+
+    # agent_reasoning is absent when gate is allowed and no chat collection occurred
+    assert "agent_reasoning" not in meta
+
+
+@pytest.mark.asyncio
+async def test_send_message_metadata_includes_agent_reasoning_when_gate_denied(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """When the profile gate denies the request, agent_reasoning must be present
+    with approach, decision_factors, next_field, and confidence."""
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+    denied_gate = {
+        "user_id": "user-456",
+        "completed": False,
+        "missing_fields": ["email", "gpa"],
+        "missing_required_fields": ["email", "gpa"],
+        "missing_optional_fields": [],
+        "updated_at": "2026-04-12T00:00:00",
+        "allowed": False,
+        "reason": "profile_incomplete_for_intent",
+    }
+    mock_profile_gate_service.evaluate_gate.return_value = denied_gate
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = None
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = []
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Help me complete my profile",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    meta = assistant_kwargs["metadata"]
+
+    ar = meta["agent_reasoning"]
+    assert isinstance(ar["approach"], str)
+    assert isinstance(ar["decision_factors"], list)
+    assert len(ar["decision_factors"]) > 0
+    assert ar["next_field"] == "email"
+    assert isinstance(ar["confidence"], float)

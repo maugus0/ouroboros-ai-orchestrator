@@ -433,6 +433,7 @@ class ChatService:
             target_agent = intent_policy.get("agent") if isinstance(intent_policy, dict) else None
             cached_response: dict[str, Any] | None = None
             active_profile_slot: dict[str, Any] | None = None
+            collected_from_chat: dict[str, Any] | None = None
 
             if detected_intent == "out_of_scope":
                 assistant_content = self._build_out_of_scope_response(intent_policy)
@@ -477,7 +478,6 @@ class ChatService:
                     gate = cached_response["gate"]
                     target_agent = cached_response.get("target_agent", target_agent)
                 else:
-                    collected_from_chat: dict[str, Any] | None = None
                     clarification_question: Optional[str] = None
                     clarification_field: Optional[str] = None
                     active_profile_slot = None
@@ -541,22 +541,45 @@ class ChatService:
             )
 
             assistant_message_id = str(uuid.uuid4())
+            selected_agent = self._resolve_selected_agent(
+                gate=gate,
+                target_agent=target_agent,
+                detected_intent=detected_intent,
+            )
+            assistant_metadata: dict[str, Any] = {
+                "profile_gate": gate,
+                "workflow_run_id": workflow_run_id,
+                "retry_of_log_id": retry_of_log_id,
+                "intent": detected_intent,
+                "active_profile_slot": (
+                    (cached_response or {}).get("active_profile_slot")
+                    if cached_response is not None
+                    else active_profile_slot
+                ),
+                "orchestrator_thoughts": self._build_orchestrator_thoughts(
+                    detected_intent=detected_intent,
+                ),
+                "gate_decision": self._build_gate_decision(gate),
+                "routing_decision": self._build_routing_decision(
+                    selected_agent=selected_agent,
+                    target_agent=target_agent,
+                    gate=gate,
+                    detected_intent=detected_intent,
+                ),
+            }
+            agent_reasoning = self._build_agent_reasoning(
+                gate=gate,
+                collected_from_chat=collected_from_chat,
+            )
+            if agent_reasoning is not None:
+                assistant_metadata["agent_reasoning"] = agent_reasoning
+
             assistant_message = await self.message_repo.create(
                 message_id=assistant_message_id,
                 chat_id=chat_id,
                 role="assistant",
                 content=assistant_content,
-                metadata={
-                    "profile_gate": gate,
-                    "workflow_run_id": workflow_run_id,
-                    "retry_of_log_id": retry_of_log_id,
-                    "intent": detected_intent,
-                    "active_profile_slot": (
-                        (cached_response or {}).get("active_profile_slot")
-                        if cached_response is not None
-                        else active_profile_slot
-                    ),
-                },
+                metadata=assistant_metadata,
             )
             logger.info(
                 "message_sent", user_id=user_id, chat_id=chat_id, message_id=assistant_message_id, role="assistant"
@@ -1392,6 +1415,104 @@ class ChatService:
             "I can help with scholarships and program searches, but I need to finish your profile first. "
             f"Let's start with your {first_missing}. Once you send that, I'll ask for the next detail."
         )
+
+    @staticmethod
+    def _build_orchestrator_thoughts(*, detected_intent: str) -> dict[str, Any]:
+        normalized_intent = str(detected_intent or "unknown")
+        confidence = 0.9 if normalized_intent != "profile_completion" else 0.8
+        return {
+            "intent": normalized_intent,
+            "intent_confidence": confidence,
+        }
+
+    @staticmethod
+    def _build_gate_decision(gate: dict[str, Any]) -> dict[str, Any]:
+        missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+        allowed = bool(gate.get("allowed"))
+        gate_status = "COMPLETE" if allowed else "INCOMPLETE"
+        reason = str(gate.get("reason") or "")
+        human_reason = {
+            "profile_complete_for_intent": "Profile is complete for this intent.",
+            "profile_incomplete_for_intent": "Profile is missing required fields for this intent.",
+            "intent_out_of_scope": "This request is outside supported scope.",
+            "intent_agent_unavailable": "The required agent is currently unavailable.",
+            "bypass_after_reminder": "Request allowed after prior profile reminder.",
+        }.get(reason, reason or "Gate decision computed.")
+        return {
+            "allowed": allowed,
+            "status": gate_status,
+            "missing_fields": missing_fields,
+            "reason": human_reason,
+        }
+
+    @staticmethod
+    def _resolve_selected_agent(*, gate: dict[str, Any], target_agent: Optional[str], detected_intent: str) -> str:
+        reason = str(gate.get("reason") or "")
+        if reason == "intent_out_of_scope":
+            return "orchestrator"
+        if reason == "intent_agent_unavailable":
+            return str(target_agent or "orchestrator")
+        if gate.get("allowed") is False:
+            return "student-profile"
+        if target_agent:
+            return str(target_agent)
+        if detected_intent == "profile_completion":
+            return "student-profile"
+        return "orchestrator"
+
+    @staticmethod
+    def _build_routing_decision(
+        *,
+        selected_agent: str,
+        target_agent: Optional[str],
+        gate: dict[str, Any],
+        detected_intent: str,
+    ) -> dict[str, Any]:
+        reason = str(gate.get("reason") or "")
+        if reason == "intent_out_of_scope":
+            routing_reason = "Request is out of scope, handled by orchestrator boundary response."
+            confidence = 0.95
+        elif reason == "intent_agent_unavailable":
+            routing_reason = f"Intent maps to '{target_agent}', but agent is unavailable."
+            confidence = 0.92
+        elif gate.get("allowed") is False:
+            routing_reason = "Profile is incomplete, so routing to student-profile flow."
+            confidence = 0.94
+        else:
+            routing_reason = f"Profile gate passed for intent '{detected_intent}'."
+            confidence = 0.9
+
+        return {
+            "selected_agent": selected_agent,
+            "routing_reason": routing_reason,
+            "confidence": confidence,
+            "alternative_agents": [],
+        }
+
+    @staticmethod
+    def _build_agent_reasoning(
+        *, gate: dict[str, Any], collected_from_chat: Optional[dict[str, Any]]
+    ) -> Optional[dict[str, Any]]:
+        from_student_profile = isinstance(collected_from_chat, dict) and isinstance(
+            collected_from_chat.get("agent_reasoning"), dict
+        )
+        if from_student_profile:
+            return dict(collected_from_chat["agent_reasoning"])
+
+        if gate.get("allowed") is False:
+            missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+            next_field = missing_fields[0] if missing_fields else None
+            factors: list[str] = ["Profile gate is not yet complete."]
+            if missing_fields:
+                factors.append(f"Missing fields: {', '.join(missing_fields)}")
+            return {
+                "approach": "Collect required profile fields before domain agent routing.",
+                "decision_factors": factors,
+                "next_field": next_field,
+                "confidence": 0.9,
+            }
+
+        return None
 
     def _build_intent_gated_response(
         self,

@@ -81,7 +81,9 @@ class ProgramDiscoveryClient(AgentClient):
         question: str,
         *,
         filters: Optional[dict[str, Any]] = None,
+        student_profile: Optional[dict[str, Any]] = None,
         limit: int = 10,
+        include_explainability: bool = True,
         user_id: str,
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -93,11 +95,47 @@ class ProgramDiscoveryClient(AgentClient):
         to PDA's LLM-powered endpoint which uses OpenAI/Anthropic with its
         database of institutions and programs to generate an answer.
 
-        Returns: {"answer": "...", "programs": [...], "sources": [...]}
+        Args:
+            question: The user's question about programs
+            filters: Optional search filters (field, degree_type, country, etc.)
+            student_profile: Optional student profile for personalized responses
+                Expected shape: {gpa, nationality, target_degree_level, field_of_study,
+                target_country, work_experience_years, research_interests, skills, test_scores}
+            limit: Max programs to consider (default 10)
+            include_explainability: Include agent_reasoning with ReAct trace (default True)
+
+        Returns:
+            {
+                "answer": str,
+                "programs_mentioned": list[str],
+                "follow_up_suggestions": list[str],
+                "confidence": float,
+                "model": str,
+                "provider": str,
+                "agent_reasoning": {  # Optional, when include_explainability=True
+                    "approach": str,
+                    "decision_factors": list[str],
+                    "ranking_breakdown": list[{program_id, program_name, university,
+                        composite_score, rank, match_scores, evidence}],
+                    "filters_applied": list[str],
+                    "total_programs_evaluated": int,
+                    "total_programs_recommended": int,
+                    "confidence": float,
+                    "model": str,
+                    "provider": str,
+                    "react_decision_trace": dict
+                }
+            }
         """
-        payload: dict[str, Any] = {"question": question, "limit": limit}
+        payload: dict[str, Any] = {
+            "question": question,
+            "limit": limit,
+            "include_explainability": include_explainability,
+        }
         if filters:
             payload["filters"] = filters
+        if student_profile:
+            payload["student_profile"] = student_profile
         return await self.request(
             "POST",
             "/chat/ask",
@@ -124,12 +162,12 @@ class ProgramDiscoveryClient(AgentClient):
     ) -> dict[str, Any]:
         """POST /chat/extract-intent — Extract search filters from natural language.
 
-        Returns: {"field": "...", "degree_type": "...", "country": "...", ...}
+        Returns: {"intent": "...", "filters": {...}, "entities": {...}}
         """
         return await self.request(
             "POST",
             "/chat/extract-intent",
-            json={"text": text},
+            json={"message": text},
             trace_id=trace_id,
             user_id=user_id,
             session_id=session_id,
@@ -148,10 +186,13 @@ class ProgramDiscoveryClient(AgentClient):
     async def search_programs(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         *,
+        query: Optional[str] = None,
         field: Optional[str] = None,
         degree_type: Optional[str] = None,
         country: Optional[str] = None,
-        institution_name: Optional[str] = None,
+        institution_id: Optional[str] = None,
+        min_rank: Optional[int] = None,
+        max_rank: Optional[int] = None,
         page: int = 1,
         page_size: int = 20,
         user_id: str,
@@ -159,14 +200,29 @@ class ProgramDiscoveryClient(AgentClient):
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
     ) -> dict[str, Any]:
-        """GET /programs — Structured program search with filters."""
+        """GET /programs — Structured program search with filters.
+
+        Args:
+            query: Search by program name or description
+            field: Filter by field of study
+            degree_type: Filter by degree type (bachelor, master, phd)
+            country: Filter by country
+            institution_id: Filter by institution UUID
+            min_rank: Min university rank
+            max_rank: Max university rank
+            page: Page number (1-indexed)
+            page_size: Items per page (max 100)
+        """
         params = {
             k: v
             for k, v in {
+                "query": query,
                 "field": field,
                 "degree_type": degree_type,
                 "country": country,
-                "institution_name": institution_name,
+                "institution_id": institution_id,
+                "min_rank": min_rank,
+                "max_rank": max_rank,
                 "page": page,
                 "page_size": page_size,
             }.items()
@@ -332,9 +388,13 @@ class ProgramDiscoveryClient(AgentClient):
     async def search_institutions(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         *,
+        query: Optional[str] = None,
         country: Optional[str] = None,
-        name: Optional[str] = None,
-        region: Optional[str] = None,
+        institution_type: Optional[str] = None,
+        min_rank: Optional[int] = None,
+        max_rank: Optional[int] = None,
+        ranking_source: Optional[str] = None,
+        ranking_year: Optional[int] = None,
         page: int = 1,
         page_size: int = 20,
         user_id: str,
@@ -342,13 +402,29 @@ class ProgramDiscoveryClient(AgentClient):
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
     ) -> dict[str, Any]:
-        """GET /institutions — Search institutions with filters."""
+        """GET /institutions — Search institutions with filters.
+
+        Args:
+            query: Search by institution name
+            country: Filter by country
+            institution_type: Filter by type (public, private)
+            min_rank: Minimum rank position
+            max_rank: Maximum rank position
+            ranking_source: Filter by ranking source (qs_world, etc.)
+            ranking_year: Filter by ranking year
+            page: Page number (1-indexed)
+            page_size: Items per page (max 100)
+        """
         params = {
             k: v
             for k, v in {
+                "query": query,
                 "country": country,
-                "name": name,
-                "region": region,
+                "institution_type": institution_type,
+                "min_rank": min_rank,
+                "max_rank": max_rank,
+                "ranking_source": ranking_source,
+                "ranking_year": ranking_year,
                 "page": page,
                 "page_size": page_size,
             }.items()

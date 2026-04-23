@@ -2,6 +2,7 @@
 
 # pylint: disable=too-many-lines
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -19,6 +20,7 @@ from fastapi import HTTPException, status
 from app.clients.agent_client import AgentClientError
 from app.clients.application_support_client import ApplicationSupportClient
 from app.clients.program_discovery_client import ProgramDiscoveryClient
+from app.clients.scholarship_discovery_client import ScholarshipDiscoveryClient
 from app.core.database import get_pool
 from app.core.logging import get_logger
 from app.models.results import DiscoverRequest
@@ -26,6 +28,7 @@ from app.repositories.agent_call_log_repo import AgentCallLogRepository
 from app.repositories.chat_repo import ChatRepository
 from app.repositories.message_repo import MessageRepository
 from app.repositories.project_repo import ProjectRepository
+from app.repositories.user_repo import UserRepository
 from app.repositories.workflow_run_repo import WorkflowRunRepository
 from app.services.agent_availability_service import AgentAvailabilityService
 from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS, detect_application_support_action
@@ -74,6 +77,10 @@ def _lazy_program_discovery_client() -> ProgramDiscoveryClient:
     return ProgramDiscoveryClient()
 
 
+def _lazy_scholarship_discovery_client() -> ScholarshipDiscoveryClient:
+    return ScholarshipDiscoveryClient()
+
+
 def _lazy_application_support_client() -> ApplicationSupportClient:
     return ApplicationSupportClient()
 
@@ -90,14 +97,14 @@ def _as_string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
-class ChatService:
+class ChatService:  # pylint: disable=too-many-public-methods
     """Orchestrates chat session operations."""
 
     _RESPONSE_CACHE_TTL_SECONDS = 90
     _RESPONSE_CACHE_MAX_ENTRIES = 256
     _RESPONSE_CACHE: OrderedDict[tuple[str, str], tuple[float, dict[str, Any]]] = OrderedDict()
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         chat_repo: Optional[ChatRepository] = None,
         message_repo: Optional[MessageRepository] = None,
@@ -108,6 +115,7 @@ class ChatService:
         intent_registry_service: Optional[IntentRegistryService] = None,
         agent_availability_service: Optional[AgentAvailabilityService] = None,
         program_discovery_client: Optional[ProgramDiscoveryClient] = None,
+        scholarship_discovery_client: Optional[ScholarshipDiscoveryClient] = None,
         application_support_client: Optional[ApplicationSupportClient] = None,
         result_aggregation_service: Optional[ResultAggregationService] = None,
     ) -> None:
@@ -120,6 +128,7 @@ class ChatService:
         self._intent_registry_service = intent_registry_service
         self._agent_availability_service = agent_availability_service
         self._program_discovery_client = program_discovery_client
+        self._scholarship_discovery_client = scholarship_discovery_client
         self._application_support_client = application_support_client
         self._result_aggregation_service = result_aggregation_service
 
@@ -235,6 +244,12 @@ class ChatService:
         if self._program_discovery_client is None:
             self._program_discovery_client = _lazy_program_discovery_client()
         return self._program_discovery_client
+
+    @property
+    def scholarship_discovery_client(self) -> ScholarshipDiscoveryClient:
+        if self._scholarship_discovery_client is None:
+            self._scholarship_discovery_client = _lazy_scholarship_discovery_client()
+        return self._scholarship_discovery_client
 
     @property
     def application_support_client(self) -> ApplicationSupportClient:
@@ -448,6 +463,7 @@ class ChatService:
             cached_response: dict[str, Any] | None = None
             active_profile_slot: dict[str, Any] | None = None
             collected_from_chat: dict[str, Any] | None = None
+            agent_reasoning_from_response: dict[str, Any] | None = None
 
             if detected_intent == "out_of_scope":
                 assistant_content = self._build_out_of_scope_response(intent_policy)
@@ -491,7 +507,9 @@ class ChatService:
                     assistant_content = cached_response["assistant_content"]
                     gate = cached_response["gate"]
                     target_agent = cached_response.get("target_agent", target_agent)
+                    agent_reasoning_from_response = cached_response.get("agent_reasoning_from_response")
                 else:
+                    agent_reasoning_from_response = None
                     clarification_question: Optional[str] = None
                     clarification_field: Optional[str] = None
                     active_profile_slot = None
@@ -511,7 +529,7 @@ class ChatService:
                             )
                         )
 
-                    assistant_content, gate = await self._resolve_assistant_content(
+                    response_dict, gate = await self._resolve_assistant_content(
                         gate=gate,
                         collected_from_chat=collected_from_chat,
                         clarification_question=clarification_question,
@@ -522,6 +540,8 @@ class ChatService:
                         content=content,
                         workflow_run_id=workflow_run_id,
                     )
+                    assistant_content = response_dict.get("answer", "")
+                    agent_reasoning_from_response = response_dict.get("agent_reasoning")
 
                     active_profile_slot = self._build_active_profile_slot(
                         clarification_field=clarification_field,
@@ -536,6 +556,7 @@ class ChatService:
                         cache_key,
                         {
                             "assistant_content": assistant_content,
+                            "agent_reasoning_from_response": agent_reasoning_from_response,
                             "gate": gate,
                             "target_agent": target_agent,
                             "active_profile_slot": active_profile_slot,
@@ -581,9 +602,10 @@ class ChatService:
                     detected_intent=detected_intent,
                 ),
             }
-            agent_reasoning = self._build_agent_reasoning(
+            agent_reasoning = self._build_agent_reasoning(  # pylint: disable=unexpected-keyword-arg
                 gate=gate,
                 collected_from_chat=collected_from_chat,
+                agent_reasoning_from_response=agent_reasoning_from_response,
             )
             if agent_reasoning is not None:
                 assistant_metadata["agent_reasoning"] = agent_reasoning
@@ -725,7 +747,11 @@ class ChatService:
                 routed_to_react_clarification = collected_from_chat is not None
 
         if not routed_to_react_clarification:
-            missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+            # Include both required AND optional missing fields for extraction
+            # This allows users to provide optional fields like target_study_country voluntarily
+            missing_required = _as_string_list(gate.get("missing_required_fields") or [])
+            missing_optional = _as_string_list(gate.get("missing_optional_fields") or [])
+            missing_fields = list(set(missing_required + missing_optional))
             collected_from_chat = await self.profile_gate_service.collect_profile_updates_from_chat(
                 user_id=user_id,
                 content=content,
@@ -926,17 +952,26 @@ class ChatService:
         chat_id: str,
         content: str,
         workflow_run_id: str,
-    ) -> str:
+        gate: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         """Call Program Discovery Agent to answer a program-related question.
 
         Uses PDA's /chat/ask endpoint which has LLM integration (OpenAI/Anthropic)
         and access to institutions with QS World Rankings data.
         Falls back to a helpful message if the PDA call fails.
+
+        Returns:
+            Dict with 'answer' (str) and optional 'agent_reasoning' (dict).
         """
         started_at = time.perf_counter()
+
+        student_profile = await self._get_student_profile_for_agents(user_id, gate or {})
+
         try:
             result = await self.program_discovery_client.ask_question(
                 question=content,
+                student_profile=student_profile,
+                include_explainability=True,
                 user_id=user_id,
                 session_id=chat_id,
             )
@@ -949,7 +984,7 @@ class ChatService:
                 request_method="POST",
                 request_path="/chat/ask",
                 call_status="success",
-                request_payload={"question": content},
+                request_payload={"question": content, "student_profile": student_profile},
                 response_payload=self._truncate_response_for_logging(result),
                 latency_ms=self._elapsed_ms(started_at),
             )
@@ -959,7 +994,11 @@ class ChatService:
                 if not answer and isinstance(result.get("data"), dict):
                     answer = result["data"].get("answer") or result["data"].get("response")
                 if answer and isinstance(answer, str) and answer.strip():
-                    return answer.strip()
+                    return {
+                        "answer": answer.strip(),
+                        "agent_reasoning": result.get("agent_reasoning"),
+                        "source": "program_discovery",
+                    }
 
             logger.warning(
                 "program_discovery_unexpected_response_shape",
@@ -967,11 +1006,15 @@ class ChatService:
                 chat_id=chat_id,
                 response_keys=list(result.keys()) if isinstance(result, dict) else type(result).__name__,
             )
-            return (
-                "I found some information about programs but had trouble formatting the response. "
-                "Could you try rephrasing your question? For example, ask about specific fields, "
-                "countries, or universities."
-            )
+            return {
+                "answer": (
+                    "I found some information about programs but had trouble formatting the response. "
+                    "Could you try rephrasing your question? For example, ask about specific fields, "
+                    "countries, or universities."
+                ),
+                "agent_reasoning": None,
+                "source": "program_discovery",
+            }
 
         except AgentClientError as exc:
             await self._record_program_discovery_call(
@@ -995,10 +1038,14 @@ class ChatService:
                 status_code=exc.status_code,
                 error=str(exc),
             )
-            return (
-                "I tried to look up program information for you, but the program discovery "
-                "service encountered an issue. Please try again in a moment."
-            )
+            return {
+                "answer": (
+                    "I tried to look up program information for you, but the program discovery "
+                    "service encountered an issue. Please try again in a moment."
+                ),
+                "agent_reasoning": None,
+                "source": "program_discovery",
+            }
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(
                 "program_discovery_unexpected_error",
@@ -1006,7 +1053,11 @@ class ChatService:
                 chat_id=chat_id,
                 error=str(exc),
             )
-            return "I ran into an unexpected issue while searching for programs. " "Please try again shortly."
+            return {
+                "answer": ("I ran into an unexpected issue while searching for programs. " "Please try again shortly."),
+                "agent_reasoning": None,
+                "source": "program_discovery",
+            }
 
     async def _handle_result_aggregation_discovery(
         self,
@@ -1072,6 +1123,44 @@ class ChatService:
             return (
                 "I tried to run discovery for your dashboard, but one of the discovery agents "
                 "encountered an issue. Please try again in a moment."
+            )
+
+    async def _save_discovery_to_dashboard_async(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        detected_intent: str,
+    ) -> None:
+        """Background task to save discovery results to dashboard.
+
+        Runs asynchronously without blocking the chat response.
+        This ensures users see the same results in both chat and dashboard.
+        """
+        try:
+            await self._handle_result_aggregation_discovery(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                detected_intent=detected_intent,
+            )
+            logger.info(
+                "dashboard_save_completed",
+                user_id=user_id,
+                chat_id=chat_id,
+                intent=detected_intent,
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Don't let dashboard save failures affect chat response
+            logger.warning(
+                "dashboard_save_failed_non_blocking",
+                error=str(exc),
+                user_id=user_id,
+                chat_id=chat_id,
+                intent=detected_intent,
             )
 
     @classmethod
@@ -1267,6 +1356,873 @@ class ChatService:
         except (aiomysql.Error, RuntimeError, ValueError, TypeError, AttributeError) as exc:
             logger.warning("pda_call_log_write_failed", operation=operation, error=str(exc))
 
+    async def _handle_scholarship_search(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        gate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Call Scholarship Discovery Agent to search scholarships.
+
+        Uses SDA's /api/v1/scholarships/search endpoint which filters
+        scholarships based on student profile and optional program links.
+        Falls back to a helpful message if the SDA call fails.
+        """
+        started_at = time.perf_counter()
+
+        # Get profile data and transform it for SDA's expected format
+        raw_profile = await self._get_student_profile_for_agents(user_id, gate)
+        student_profile = self._transform_profile_for_sda(raw_profile)
+
+        # Extract program context from user's message
+        program_context = await self._extract_program_context_for_scholarships(
+            content=content,
+            user_id=user_id,
+            chat_id=chat_id,
+            workflow_run_id=workflow_run_id,
+        )
+
+        program_ids = program_context.get("program_ids", [])
+        provider = program_context.get("provider")
+        unresolved_context = program_context.get("unresolved_context")
+
+        # If we have unresolved program mentions, enrich the profile with that context
+        if unresolved_context and student_profile:
+            if unresolved_context.get("field") and not student_profile.get("field_of_study"):
+                student_profile["field_of_study"] = unresolved_context["field"]
+            if unresolved_context.get("degree_type") and not student_profile.get("degree_type"):
+                student_profile["degree_type"] = unresolved_context["degree_type"]
+
+        try:
+            result = await self.scholarship_discovery_client.search_scholarships(
+                user_id=user_id,
+                student_profile=student_profile if student_profile else None,
+                program_ids=program_ids if program_ids else None,
+                provider=provider,
+                trace_id=workflow_run_id,
+                session_id=chat_id,
+            )
+
+            await self._record_scholarship_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="scholarship_search",
+                request_method="POST",
+                request_path="/api/v1/scholarships/search",
+                call_status="success",
+                request_payload={
+                    "student_profile": student_profile,
+                    "program_ids": program_ids,
+                    "provider": provider,
+                    "program_context": program_context,
+                },
+                response_payload=self._truncate_scholarship_response_for_logging(result),
+                latency_ms=self._elapsed_ms(started_at),
+            )
+
+            formatted_answer = self._format_scholarship_search_response(
+                result,
+                program_context=program_context,
+            )
+            # Extract agent_reasoning from SDA response
+            agent_reasoning = result.get("agent_reasoning")
+            return {
+                "answer": formatted_answer,
+                "agent_reasoning": agent_reasoning,
+                "source": "scholarship_discovery",
+            }
+
+        except AgentClientError as exc:
+            await self._record_scholarship_discovery_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="scholarship_search",
+                request_method="POST",
+                request_path="/api/v1/scholarships/search",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="agent_client_error",
+                error_message=str(exc),
+                request_payload={
+                    "student_profile": student_profile,
+                    "program_ids": program_ids,
+                    "provider": provider,
+                },
+                latency_ms=self._elapsed_ms(started_at),
+            )
+            logger.error(
+                "scholarship_discovery_call_failed",
+                user_id=user_id,
+                chat_id=chat_id,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return {
+                "answer": (
+                    "I tried to search scholarships for you, but the scholarship discovery "
+                    "service encountered an issue. Please try again in a moment."
+                ),
+                "agent_reasoning": None,
+                "source": "scholarship_discovery",
+            }
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "scholarship_discovery_unexpected_error",
+                user_id=user_id,
+                chat_id=chat_id,
+                error=str(exc),
+            )
+            return {
+                "answer": "I ran into an unexpected issue while searching for scholarships. Please try again shortly.",
+                "agent_reasoning": None,
+                "source": "scholarship_discovery",
+            }
+
+    async def _extract_program_context_for_scholarships(
+        self,
+        content: str,
+        user_id: str,
+        chat_id: str,  # pylint: disable=unused-argument  # Reserved for future conversation context
+        workflow_run_id: str,
+    ) -> dict[str, Any]:
+        """Extract program context from user's scholarship query.
+
+        This method:
+        1. Extracts university/program/field mentions from the message
+        2. Extracts scholarship provider mentions (Fulbright, etc.)
+        3. Searches PDA for matching programs if university is mentioned
+        4. Returns program_ids if found, or unresolved context if not
+
+        Examples:
+        - "scholarships for MIT computer science" → search PDA for MIT CS programs
+        - "Fulbright scholarships for engineering" → provider=Fulbright, field=engineering
+        - "funding for Stanford MBA" → search PDA for Stanford MBA programs
+        """
+        context: dict[str, Any] = {
+            "program_ids": [],
+            "programs": [],
+            "provider": None,
+            "mentioned_university": None,
+            "mentioned_field": None,
+            "mentioned_degree": None,
+            "unresolved_context": None,
+        }
+
+        content_lower = content.lower()
+
+        # 1. Extract scholarship provider mentions
+        provider_keywords = {
+            "fulbright": "Fulbright",
+            "gates cambridge": "Gates Cambridge",
+            "gates": "Gates Foundation",
+            "chevening": "Chevening",
+            "erasmus": "Erasmus",
+            "commonwealth": "Commonwealth",
+            "rhodes": "Rhodes",
+            "marshall": "Marshall",
+            "schwarzman": "Schwarzman",
+            "knight-hennessy": "Knight-Hennessy",
+        }
+        for keyword, provider_name in provider_keywords.items():
+            if keyword in content_lower:
+                context["provider"] = provider_name
+                logger.info("scholarship_provider_extracted", provider=provider_name, user_id=user_id)
+                break
+
+        # 2. Extract university mentions and infer country
+        university_patterns = self._get_university_patterns()
+        university_country_map = self._get_university_country_map()
+        mentioned_university = None
+        inferred_country = None
+        for pattern, university_name in university_patterns.items():
+            if pattern in content_lower:
+                mentioned_university = university_name
+                context["mentioned_university"] = university_name
+                # Infer country from university
+                inferred_country = university_country_map.get(university_name)
+                if inferred_country:
+                    context["inferred_country"] = inferred_country
+                    logger.info(
+                        "country_inferred_from_university",
+                        university=university_name,
+                        country=inferred_country,
+                        user_id=user_id,
+                    )
+                # If no external provider (Fulbright etc) was found, use university as provider
+                # This allows "NUS scholarships" to find scholarships where provider="National University of Singapore"
+                if not context["provider"]:
+                    context["provider"] = university_name
+                    logger.info(
+                        "university_used_as_scholarship_provider",
+                        university=university_name,
+                        user_id=user_id,
+                    )
+                break
+
+        # 3. Extract field of study mentions
+        field_patterns = {
+            "computer science": "Computer Science",
+            "cs program": "Computer Science",
+            "engineering": "Engineering",
+            "business": "Business",
+            "mba": "Business Administration",
+            "medicine": "Medicine",
+            "law": "Law",
+            "economics": "Economics",
+            "data science": "Data Science",
+            "artificial intelligence": "Artificial Intelligence",
+            "machine learning": "Machine Learning",
+            "physics": "Physics",
+            "mathematics": "Mathematics",
+            "biology": "Biology",
+            "chemistry": "Chemistry",
+            "psychology": "Psychology",
+        }
+        for pattern, field_name in field_patterns.items():
+            if pattern in content_lower:
+                context["mentioned_field"] = field_name
+                break
+
+        # 4. Extract degree type mentions
+        degree_patterns = {
+            "phd": "phd",
+            "doctorate": "phd",
+            "doctoral": "phd",
+            "master": "master",
+            "masters": "master",
+            "msc": "master",
+            "mba": "master",
+            "bachelor": "bachelor",
+            "undergraduate": "bachelor",
+            "undergrad": "bachelor",
+        }
+        for pattern, degree_type in degree_patterns.items():
+            if pattern in content_lower:
+                context["mentioned_degree"] = degree_type
+                break
+
+        # 5. If university is mentioned, search PDA for matching programs
+        if mentioned_university:
+            pda_programs = await self._search_pda_for_programs(
+                university_name=mentioned_university,
+                field=context.get("mentioned_field"),
+                degree_type=context.get("mentioned_degree"),
+                user_id=user_id,
+                workflow_run_id=workflow_run_id,
+            )
+
+            if pda_programs:
+                context["program_ids"] = [p["id"] for p in pda_programs if p.get("id")]
+                context["programs"] = pda_programs
+                logger.info(
+                    "programs_found_for_scholarship_search",
+                    user_id=user_id,
+                    university=mentioned_university,
+                    program_count=len(pda_programs),
+                    program_ids=context["program_ids"][:5],
+                )
+            else:
+                # Programs not found in PDA, but we have context to pass
+                context["unresolved_context"] = {
+                    "university_name": mentioned_university,
+                    "field": context.get("mentioned_field"),
+                    "degree_type": context.get("mentioned_degree"),
+                }
+                logger.info(
+                    "programs_not_found_using_unresolved_context",
+                    user_id=user_id,
+                    university=mentioned_university,
+                    field=context.get("mentioned_field"),
+                )
+
+        # 6. Even without university, if field/degree mentioned, set as unresolved context
+        elif context.get("mentioned_field") or context.get("mentioned_degree"):
+            context["unresolved_context"] = {
+                "field": context.get("mentioned_field"),
+                "degree_type": context.get("mentioned_degree"),
+            }
+
+        return context
+
+    async def _search_pda_for_programs(
+        self,
+        university_name: str,
+        field: Optional[str],
+        degree_type: Optional[str],
+        user_id: str,
+        workflow_run_id: str,
+    ) -> list[dict[str, Any]]:
+        """Search PDA for programs matching the university/field/degree.
+
+        Returns list of program dicts with id, name, institution, field, degree_type, country.
+        """
+        try:
+            # First, search for the institution
+            institutions_result = await self.program_discovery_client.search_institutions(
+                query=university_name,
+                page_size=5,
+                user_id=user_id,
+                trace_id=workflow_run_id,
+            )
+
+            institution_id = None
+            institution_data = None
+            if isinstance(institutions_result, dict):
+                items = institutions_result.get("items") or institutions_result.get("data", {}).get("items", [])
+                if items and isinstance(items, list) and len(items) > 0:
+                    institution_data = items[0]
+                    institution_id = institution_data.get("id")
+
+            if not institution_id:
+                logger.info(
+                    "institution_not_found_in_pda",
+                    university_name=university_name,
+                    user_id=user_id,
+                )
+                return []
+
+            # Search for programs at this institution
+            programs_result = await self.program_discovery_client.search_programs(
+                institution_id=institution_id,
+                field=field,
+                degree_type=degree_type,
+                page_size=10,
+                user_id=user_id,
+                trace_id=workflow_run_id,
+            )
+
+            programs = []
+            if isinstance(programs_result, dict):
+                items = programs_result.get("items") or programs_result.get("data", {}).get("items", [])
+                if items and isinstance(items, list):
+                    for program in items[:10]:
+                        programs.append(
+                            {
+                                "id": program.get("id"),
+                                "name": program.get("name"),
+                                "institution_name": (
+                                    program.get("institution", {}).get("name") or institution_data.get("name")
+                                    if institution_data
+                                    else None
+                                ),
+                                "field": program.get("field"),
+                                "degree_type": program.get("degree_type"),
+                                "country": (
+                                    program.get("institution", {}).get("country") or institution_data.get("country")
+                                    if institution_data
+                                    else None
+                                ),
+                            }
+                        )
+
+            return programs
+
+        except AgentClientError as exc:
+            logger.warning(
+                "pda_search_for_scholarship_context_failed",
+                university_name=university_name,
+                error=str(exc),
+                user_id=user_id,
+            )
+            return []
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "pda_search_unexpected_error",
+                university_name=university_name,
+                error=str(exc),
+                user_id=user_id,
+            )
+            return []
+
+    @staticmethod
+    def _get_university_patterns() -> dict[str, str]:
+        """Return mapping of search patterns to canonical university names."""
+        return {
+            # US Universities
+            "mit": "Massachusetts Institute of Technology",
+            "massachusetts institute of technology": "Massachusetts Institute of Technology",
+            "stanford": "Stanford University",
+            "harvard": "Harvard University",
+            "yale": "Yale University",
+            "princeton": "Princeton University",
+            "columbia": "Columbia University",
+            "berkeley": "University of California, Berkeley",
+            "uc berkeley": "University of California, Berkeley",
+            "ucla": "University of California, Los Angeles",
+            "caltech": "California Institute of Technology",
+            "carnegie mellon": "Carnegie Mellon University",
+            "cmu": "Carnegie Mellon University",
+            "nyu": "New York University",
+            "upenn": "University of Pennsylvania",
+            "penn": "University of Pennsylvania",
+            "cornell": "Cornell University",
+            "duke": "Duke University",
+            "northwestern": "Northwestern University",
+            "uchicago": "University of Chicago",
+            "johns hopkins": "Johns Hopkins University",
+            "georgia tech": "Georgia Institute of Technology",
+            # UK Universities
+            "oxford": "University of Oxford",
+            "cambridge": "University of Cambridge",
+            "imperial": "Imperial College London",
+            "imperial college": "Imperial College London",
+            "ucl": "University College London",
+            "lse": "London School of Economics",
+            "edinburgh": "University of Edinburgh",
+            "manchester": "University of Manchester",
+            "kings college": "King's College London",
+            "kcl": "King's College London",
+            # Singapore Universities
+            "nus": "National University of Singapore",
+            "ntu": "Nanyang Technological University",
+            "nanyang": "Nanyang Technological University",
+            "smu": "Singapore Management University",
+            "sutd": "Singapore University of Technology and Design",
+            # Other
+            "eth zurich": "ETH Zurich",
+            "eth": "ETH Zurich",
+            "epfl": "EPFL",
+            "toronto": "University of Toronto",
+            "mcgill": "McGill University",
+            "melbourne": "University of Melbourne",
+            "sydney": "University of Sydney",
+            "anu": "Australian National University",
+            "tsinghua": "Tsinghua University",
+            "peking": "Peking University",
+            "tokyo": "University of Tokyo",
+            "kyoto": "Kyoto University",
+            "seoul national": "Seoul National University",
+            "kaist": "KAIST",
+        }
+
+    @staticmethod
+    def _get_university_country_map() -> dict[str, str]:
+        """Return mapping of canonical university names to their countries."""
+        return {
+            # US Universities
+            "Massachusetts Institute of Technology": "United States",
+            "Stanford University": "United States",
+            "Harvard University": "United States",
+            "Yale University": "United States",
+            "Princeton University": "United States",
+            "Columbia University": "United States",
+            "University of California, Berkeley": "United States",
+            "University of California, Los Angeles": "United States",
+            "California Institute of Technology": "United States",
+            "Carnegie Mellon University": "United States",
+            "New York University": "United States",
+            "University of Pennsylvania": "United States",
+            "Cornell University": "United States",
+            "Duke University": "United States",
+            "Northwestern University": "United States",
+            "University of Chicago": "United States",
+            "Johns Hopkins University": "United States",
+            "Georgia Institute of Technology": "United States",
+            # UK Universities
+            "University of Oxford": "United Kingdom",
+            "University of Cambridge": "United Kingdom",
+            "Imperial College London": "United Kingdom",
+            "University College London": "United Kingdom",
+            "London School of Economics": "United Kingdom",
+            "University of Edinburgh": "United Kingdom",
+            "University of Manchester": "United Kingdom",
+            "King's College London": "United Kingdom",
+            # Singapore Universities
+            "National University of Singapore": "Singapore",
+            "Nanyang Technological University": "Singapore",
+            "Singapore Management University": "Singapore",
+            "Singapore University of Technology and Design": "Singapore",
+            # Switzerland
+            "ETH Zurich": "Switzerland",
+            "EPFL": "Switzerland",
+            # Canada
+            "University of Toronto": "Canada",
+            "McGill University": "Canada",
+            # Australia
+            "University of Melbourne": "Australia",
+            "University of Sydney": "Australia",
+            "Australian National University": "Australia",
+            # China
+            "Tsinghua University": "China",
+            "Peking University": "China",
+            # Japan
+            "University of Tokyo": "Japan",
+            "Kyoto University": "Japan",
+            # South Korea
+            "Seoul National University": "South Korea",
+            "KAIST": "South Korea",
+        }
+
+    async def _fetch_profile_from_spa(
+        self,
+        profile_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Fetch full profile from SPA and extract fields. Returns empty dict on failure."""
+        try:
+            response = await self.profile_gate_service.student_profile_client.get_profile(
+                profile_id=profile_id,
+                user_id=user_id,
+            )
+            if not isinstance(response, dict):
+                return {}
+            profile = response.get("data") if isinstance(response.get("data"), dict) else response
+            if not isinstance(profile, dict):
+                return {}
+            fields = self._extract_profile_fields(profile)
+            logger.info(
+                "student_profile_fetched_for_agents",
+                user_id=user_id,
+                profile_id=profile_id,
+                fields=list(fields.keys()),
+            )
+            return fields
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "student_profile_fetch_for_agents_failed",
+                user_id=user_id,
+                profile_id=profile_id,
+                error=str(exc),
+            )
+            return {}
+
+    async def _resolve_profile_id_from_status(self, user_id: str) -> Optional[str]:
+        """Get profile_id from SPA status endpoint. Returns None on failure."""
+        try:
+            response = await self.profile_gate_service.student_profile_client.get_profile_status(
+                user_id=user_id,
+            )
+            if not isinstance(response, dict):
+                return None
+            data = response.get("data") or response
+            return data.get("profile_id") if isinstance(data, dict) else None
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("profile_id_resolution_failed", user_id=user_id, error=str(exc))
+            return None
+
+    async def _get_student_profile_for_agents(
+        self,
+        user_id: str,
+        gate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Extract student profile data in the shape PDA and SDA expect.
+
+        Always returns a dict (possibly partial). Merges data from:
+        1. Gate profile_data (if available from prior profile gate evaluation)
+        2. SPA full profile (fetched by profile_id from gate)
+        3. Orchestrator's user table (basic user data as fallback)
+
+        Architecture principle: Even incomplete profiles should be sent to agents.
+        Agents handle partial data gracefully and can still provide value.
+        """
+        merged: dict[str, Any] = {}
+
+        # 1. Try gate profile_data first (already fetched during profile gating)
+        profile_data = gate.get("profile_data")
+        if isinstance(profile_data, dict):
+            merged.update(self._extract_profile_fields(profile_data))
+
+        # 2. Fetch full profile from SPA if gate didn't have profile_data
+        if not merged:
+            profile_id = gate.get("profile_id")
+            if not profile_id:
+                profile_id = await self._resolve_profile_id_from_status(user_id)
+            if profile_id:
+                merged.update(await self._fetch_profile_from_spa(profile_id, user_id))
+
+        # 3. Enrich with orchestrator user data (basic info that might not be in SPA yet)
+        await self._enrich_profile_from_user_table(merged, user_id)
+
+        # Filter out None and empty values to keep payload clean
+        return {k: v for k, v in merged.items() if v is not None and v != "" and v != []}
+
+    async def _enrich_profile_from_user_table(self, merged: dict[str, Any], user_id: str) -> None:
+        """Enrich profile dict with data from orchestrator's user table."""
+        try:
+            pool = get_pool()
+            if not pool:
+                return
+            user_repo = UserRepository(pool)
+            user = await user_repo.get_by_id(user_id)
+            if not isinstance(user, dict):
+                return
+            self._apply_user_enrichment(merged, user)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("orchestrator_user_enrichment_failed", user_id=user_id, error=str(exc))
+
+    @staticmethod
+    def _apply_user_enrichment(merged: dict[str, Any], user: dict[str, Any]) -> None:
+        """Apply user table fields to profile dict (mutates merged in place)."""
+        if not merged.get("full_name"):
+            first_name = (user.get("first_name") or "").strip()
+            last_name = (user.get("last_name") or "").strip()
+            full_name = " ".join(p for p in [first_name, last_name] if p).strip()
+            if full_name:
+                merged["full_name"] = full_name
+
+        if not merged.get("email") and user.get("email"):
+            merged["email"] = user["email"]
+
+        if not merged.get("field_of_study") and user.get("interest"):
+            merged["field_of_study"] = user["interest"]
+
+        if not merged.get("profession") and user.get("profession"):
+            merged["profession"] = user["profession"]
+
+    @staticmethod
+    def _extract_profile_fields(profile: dict[str, Any]) -> dict[str, Any]:
+        """Extract and normalize profile fields from various source formats."""
+        return {
+            "gpa": profile.get("gpa"),
+            "gpa_scale": profile.get("gpa_scale") or profile.get("gpaScale") or 4.0,
+            "nationality": profile.get("nationality"),
+            "field_of_study": (
+                profile.get("field_of_study") or profile.get("intended_field_of_study") or profile.get("fieldOfStudy")
+            ),
+            "degree_type": (
+                profile.get("degree_type") or profile.get("target_degree_level") or profile.get("targetDegreeLevel")
+            ),
+            "current_degree_level": (profile.get("current_degree_level") or profile.get("currentDegreeLevel")),
+            "target_country": (
+                profile.get("target_country") or profile.get("target_study_country") or profile.get("targetCountry")
+            ),
+            "work_experience_years": (profile.get("work_experience_years") or profile.get("workExperienceYears")),
+            "research_interests": (profile.get("research_interests") or profile.get("researchInterests")),
+            "skills": profile.get("skills"),
+            "test_scores": profile.get("test_scores") or profile.get("testScores"),
+            "full_name": profile.get("full_name") or profile.get("fullName"),
+            "email": profile.get("email"),
+            "enrollment_timeline": (profile.get("enrollment_timeline") or profile.get("enrollmentTimeline")),
+        }
+
+    @staticmethod
+    def _transform_profile_for_sda(profile: dict[str, Any]) -> dict[str, Any]:
+        """Transform profile to SDA's StudentProfileFilter expected shape.
+
+        SDA expects: gpa, gpa_scale, nationality, field_of_study, degree_type, language_test
+        """
+        if not profile:
+            return {}
+
+        sda_profile: dict[str, Any] = {}
+
+        # Direct mappings
+        if profile.get("gpa") is not None:
+            sda_profile["gpa"] = profile["gpa"]
+        if profile.get("gpa_scale") is not None:
+            sda_profile["gpa_scale"] = profile["gpa_scale"]
+        if profile.get("nationality"):
+            sda_profile["nationality"] = profile["nationality"]
+        if profile.get("field_of_study"):
+            sda_profile["field_of_study"] = profile["field_of_study"]
+        if profile.get("degree_type"):
+            sda_profile["degree_type"] = profile["degree_type"]
+
+        # Transform test_scores to language_test
+        test_scores = profile.get("test_scores")
+        if isinstance(test_scores, dict):
+            # Look for language proficiency tests
+            for test_name in ["ielts", "toefl", "duolingo", "pte"]:
+                score = test_scores.get(test_name)
+                if score is not None:
+                    sda_profile["language_test"] = f"{test_name.upper()}: {score}"
+                    break
+
+        return sda_profile
+
+    def _format_scholarship_search_response(
+        self,
+        result: dict[str, Any],
+        program_context: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Format SDA scholarship search response for the user."""
+        if not isinstance(result, dict):
+            return "I found some scholarship information but couldn't format it properly. Please try again."
+
+        data = result.get("data") or []
+        total = result.get("total", 0)
+        program_context = program_context or {}
+
+        # Build context description for the response
+        context_parts = []
+        if program_context.get("mentioned_university"):
+            context_parts.append(program_context["mentioned_university"])
+        if program_context.get("mentioned_field"):
+            context_parts.append(program_context["mentioned_field"])
+        # Only add provider if it's different from the university (to avoid duplication)
+        if program_context.get("provider") and program_context.get("provider") != program_context.get(
+            "mentioned_university"
+        ):
+            context_parts.append(program_context["provider"])
+
+        context_desc = " ".join(context_parts) if context_parts else "your profile"
+
+        if not data:
+            # Build a helpful no-results message with context
+            no_results_msg = f"I searched for scholarships matching {context_desc} but didn't find any results."
+
+            if program_context.get("unresolved_context"):
+                unresolved = program_context["unresolved_context"]
+                if unresolved.get("university_name"):
+                    no_results_msg += (
+                        f"\n\nNote: I couldn't find **{unresolved['university_name']}** in our program database. "
+                        "The scholarship search was based on your profile instead."
+                    )
+
+            no_results_msg += (
+                "\n\nThis could be because:\n"
+                "• Your profile is still incomplete\n"
+                "• The search criteria are too specific\n"
+                "• We're still building our scholarship database\n\n"
+                "Try broadening your search or completing more of your profile."
+            )
+            return no_results_msg
+
+        # Build the results header
+        if program_context.get("program_ids"):
+            programs = program_context.get("programs", [])
+            if programs:
+                # Deduplicate institution names while preserving order
+                seen_names: set[str] = set()
+                unique_names: list[str] = []
+                for p in programs[:5]:
+                    name = p.get("institution_name") or p.get("name")
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        unique_names.append(name)
+                program_list = ", ".join(unique_names[:3]) if unique_names else None
+                if program_list:
+                    header = f"I found {total} scholarship{'s' if total != 1 else ''} linked to **{program_list}**:\n"
+                else:
+                    header = f"I found {total} scholarship{'s' if total != 1 else ''} for the programs you mentioned:\n"
+            else:
+                header = f"I found {total} scholarship{'s' if total != 1 else ''} for the programs you mentioned:\n"
+        elif program_context.get("provider"):
+            header = (
+                f"I found {total} **{program_context['provider']}** scholarship{'s' if total != 1 else ''} "
+                "matching your profile:\n"
+            )
+        elif program_context.get("mentioned_university"):
+            header = (
+                f"I found {total} scholarship{'s' if total != 1 else ''} "
+                f"relevant to **{program_context['mentioned_university']}**:\n"
+            )
+        elif program_context.get("mentioned_field"):
+            header = (
+                f"I found {total} scholarship{'s' if total != 1 else ''} "
+                f"for **{program_context['mentioned_field']}**:\n"
+            )
+        else:
+            header = f"I found {total} scholarship{'s' if total != 1 else ''} matching your profile:\n"
+
+        response_parts = [header]
+
+        for i, scholarship in enumerate(data[:5], 1):
+            name = scholarship.get("name", "Unnamed Scholarship")
+            provider = scholarship.get("provider", "Unknown Provider")
+            amount = scholarship.get("funding_amount")
+            currency = scholarship.get("currency", "USD")
+            deadline = scholarship.get("deadline")
+            link_confidence = scholarship.get("link_confidence")
+
+            funding_text = f" ({currency} {amount:,.0f})" if amount else ""
+            deadline_text = f" — Deadline: {deadline}" if deadline else ""
+            confidence_text = f" (Match: {link_confidence:.0%})" if link_confidence else ""
+
+            response_parts.append(
+                f"{i}. **{name}**{funding_text}{confidence_text}\n   Provider: {provider}{deadline_text}"
+            )
+
+        if total > 5:
+            response_parts.append(f"\n...and {total - 5} more scholarships.")
+
+        # Add contextual follow-up suggestions
+        if program_context.get("unresolved_context") and program_context["unresolved_context"].get("university_name"):
+            response_parts.append(
+                f"\n\nNote: **{program_context['unresolved_context']['university_name']}** "
+                "wasn't found in our program database, so I showed scholarships based on your profile. "
+                "Would you like to search for specific programs at this university first?"
+            )
+        else:
+            response_parts.append(
+                "\nWould you like more details about any of these scholarships, "
+                "or should I refine the search with different criteria?"
+            )
+
+        return "\n".join(response_parts)
+
+    async def _record_scholarship_discovery_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        user_id: str,
+        chat_id: Optional[str],
+        workflow_run_id: Optional[str],
+        operation: str,
+        request_method: Optional[str],
+        request_path: Optional[str],
+        call_status: str,
+        http_status: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+        request_payload: Optional[dict[str, Any]] = None,
+        response_payload: Optional[dict[str, Any]] = None,
+        latency_ms: Optional[int] = None,
+    ) -> None:
+        """Log an SDA agent call for audit trail."""
+        repo = self.agent_call_log_repo
+        if repo is None:
+            return
+        try:
+            await repo.create_log(
+                log_id=str(uuid.uuid4()),
+                workflow_run_id=workflow_run_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                target_service="scholarship-discovery",
+                operation=operation,
+                request_method=request_method,
+                request_path=request_path,
+                attempt_number=1,
+                status=call_status,
+                http_status=http_status,
+                error_code=error_code,
+                error_message=error_message,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                latency_ms=latency_ms,
+                retry_of_log_id=None,
+            )
+        except (aiomysql.Error, RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning("sda_call_log_write_failed", operation=operation, error=str(exc))
+
+    @staticmethod
+    def _truncate_scholarship_response_for_logging(result: Any, max_items: int = 5) -> Optional[dict[str, Any]]:
+        """Truncate SDA response to bounded subset for agent_call_logs storage."""
+        if not isinstance(result, dict):
+            return None
+
+        truncated: dict[str, Any] = {}
+
+        if "total" in result:
+            truncated["total"] = result["total"]
+
+        if "page" in result:
+            truncated["page"] = result["page"]
+
+        data = result.get("data")
+        if isinstance(data, list):
+            truncated["data_count"] = len(data)
+            truncated["scholarship_ids"] = [
+                item.get("id") for item in data[:max_items] if isinstance(item, dict) and item.get("id")
+            ]
+
+        return truncated if truncated else None
+
     @staticmethod
     def _elapsed_ms(started_at: float) -> int:
         """Convert perf_counter start time to elapsed milliseconds."""
@@ -1419,14 +2375,18 @@ class ChatService:
         chat_id: str,
         content: str,
         workflow_run_id: str,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Generate assistant content based on profile gate status and intent.
 
         If gate is allowed, generate appropriate response for the intent.
         If gate is denied but user was already reminded, allow bypass for domain queries.
         Otherwise, return profile completion guidance.
 
-        Returns (assistant_content, updated_gate).
+        Returns:
+            (response_dict, updated_gate) where response_dict contains:
+            - answer: str - the assistant's response text
+            - agent_reasoning: Optional[dict] - reasoning from downstream agents (PDA, SDA, etc.)
+            - source: str - which agent/service generated the response
         """
         if gate["allowed"]:
             response = await self._generate_intent_response(
@@ -1467,14 +2427,14 @@ class ChatService:
             return response, updated_gate
 
         if is_domain_query and self._is_explicit_intent_request(content, detected_intent):
-            response = self._build_intent_gated_response(
+            response_text = self._build_intent_gated_response(
                 detected_intent=detected_intent,
                 missing_fields=missing_fields,
                 clarification_question=None,
             )
-            return response, gate
+            return {"answer": response_text, "agent_reasoning": None, "source": "orchestrator"}, gate
 
-        response = self._build_profile_gate_response(
+        response_text = self._build_profile_gate_response(
             missing_fields,
             applied_fields=applied_fields,
             pending_clarification_fields=_as_string_list(
@@ -1482,7 +2442,7 @@ class ChatService:
             ),
             clarification_question=clarification_question,
         )
-        return response, gate
+        return {"answer": response_text, "agent_reasoning": None, "source": "orchestrator"}, gate
 
     async def _generate_intent_response(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
@@ -1494,25 +2454,70 @@ class ChatService:
         content: str,
         workflow_run_id: str,
         gate: dict[str, Any],
-    ) -> str:
-        """Generate response for allowed intent - either PDA call or static response."""
-        if detected_intent in {"program_discovery", "scholarship_search"}:
-            return await self._handle_result_aggregation_discovery(
+    ) -> dict[str, Any]:
+        """Generate response for allowed intent - either agent call or static response.
+
+        Returns:
+            Dict with 'answer' (str) and optional 'agent_reasoning' (dict).
+        """
+        # HYBRID APPROACH: Use ORB-32's rich handlers for chat response,
+        # then save to dashboard asynchronously for consistent UX
+        if detected_intent == "program_discovery":
+            # Get rich response with agent_reasoning from ORB-32's handler
+            pda_result = await self._handle_program_discovery(
                 user_id=user_id,
                 chat_id=chat_id,
                 content=content,
                 workflow_run_id=workflow_run_id,
-                detected_intent=detected_intent,
+                gate=gate,
             )
+            # Also save to dashboard (background task - don't block response)
+            asyncio.create_task(
+                self._save_discovery_to_dashboard_async(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    content=content,
+                    workflow_run_id=workflow_run_id,
+                    detected_intent=detected_intent,
+                )
+            )
+            return pda_result
+
+        if detected_intent == "scholarship_search":
+            # Get rich response with agent_reasoning from ORB-32's handler
+            sda_result = await self._handle_scholarship_search(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                gate=gate,
+            )
+            # Also save to dashboard (background task - don't block response)
+            asyncio.create_task(
+                self._save_discovery_to_dashboard_async(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    content=content,
+                    workflow_run_id=workflow_run_id,
+                    detected_intent=detected_intent,
+                )
+            )
+            return sda_result
+
         if target_agent == "application-support":
-            return await self._build_application_support_response(
+            result = await self._build_application_support_response(
                 user_id=user_id,
                 chat_id=chat_id,
                 user_message=content,
                 detected_intent=detected_intent,
                 trace_id=workflow_run_id,
             )
-        return self._build_intent_ready_response(detected_intent, content, gate)
+            return {"answer": result, "agent_reasoning": None, "source": "application_support"}
+        return {
+            "answer": self._build_intent_ready_response(detected_intent, content, gate),
+            "agent_reasoning": None,
+            "source": "orchestrator",
+        }
 
     async def _get_latest_assistant_message(self, chat_id: str) -> Optional[dict[str, Any]]:
         """Fetch the latest assistant turn for clarification-aware intent handling."""
@@ -1721,14 +2726,23 @@ class ChatService:
 
     @staticmethod
     def _build_agent_reasoning(
-        *, gate: dict[str, Any], collected_from_chat: Optional[dict[str, Any]]
+        *,
+        gate: dict[str, Any],
+        collected_from_chat: Optional[dict[str, Any]],
+        agent_reasoning_from_response: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
+        # Priority 1: Agent reasoning from downstream response (PDA, SDA, etc.)
+        if isinstance(agent_reasoning_from_response, dict):
+            return dict(agent_reasoning_from_response)
+
+        # Priority 2: Agent reasoning from SPA via collected_from_chat
         from_student_profile = isinstance(collected_from_chat, dict) and isinstance(
             collected_from_chat.get("agent_reasoning"), dict
         )
         if from_student_profile:
             return dict(collected_from_chat["agent_reasoning"])
 
+        # Priority 3: Profile gate denial reasoning
         if gate.get("allowed") is False:
             missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
             next_field = missing_fields[0] if missing_fields else None

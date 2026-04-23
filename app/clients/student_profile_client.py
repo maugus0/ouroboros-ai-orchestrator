@@ -77,7 +77,11 @@ class StudentProfileClient(AgentClient):
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Fetch full profile details by profile id."""
+        """Fetch the full profile data by profile ID.
+
+        Returns the complete profile including gpa, nationality, field_of_study,
+        target_degree_level, and all other profile fields.
+        """
         return await self.request(
             "GET",
             f"/api/v1/profiles/{profile_id}",

@@ -670,20 +670,25 @@ class ResultAggregationService:
         limit: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         started_at = time.perf_counter()
+        student_profile = self._build_scholarship_profile_filter(profile_data)
+        program_ids = [
+            str(item.get("id"))
+            for item in self._extract_program_items(program_output)
+            if isinstance(item, dict) and item.get("id") is not None
+        ]
         payload = {
-            "student_profile": self._build_scholarship_profile_filter(profile_data),
-            "program_ids": [
-                str(item.get("id"))
-                for item in self._extract_program_items(program_output)
-                if isinstance(item, dict) and item.get("id") is not None
-            ],
+            "student_profile": student_profile,
+            "program_ids": program_ids,
             "max_results": limit,
             "page": 1,
         }
         try:
             result = await self.scholarship_discovery_client.search_scholarships(
                 user_id=user_id,
-                payload=payload,
+                student_profile=student_profile,
+                program_ids=program_ids if program_ids else None,
+                max_results=limit,
+                page=1,
                 trace_id=trace_id,
                 session_id=session_id,
             )

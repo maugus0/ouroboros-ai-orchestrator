@@ -96,10 +96,10 @@ fi
 
 echo ""
 echo "6. Running pylint..."
-if "${PYTHON_CMD}" -m pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801 > /dev/null 2>&1; then
+if "${PYTHON_CMD}" -m pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801 -j 1 > /dev/null 2>&1; then
     success "Pylint passed"
 else
-    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801"
+    error "Pylint failed. Run: pylint app/ tests/ --max-line-length=120 --disable=C0111,R0903,R0801 -j 1"
     exit 1
 fi
 

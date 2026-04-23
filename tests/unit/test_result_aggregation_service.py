@@ -212,7 +212,7 @@ async def test_discover_success_persists_versions_and_returns_dashboard():
     assert workflow_repo.completed[-1]["status"] == "success"
     assert len(log_repo.logs) >= 3
     assert program_client.rank_calls[-1]["target_degree"] == "masters"
-    assert scholarship_client.search_calls[-1]["payload"]["student_profile"]["degree_type"] == "master"
+    assert scholarship_client.search_calls[-1]["student_profile"]["degree_type"] == "master"
     assert eligibility_client.batch_calls[-1]["payload"]["user_profile"]["gpa_normalized"] == 3.8
     assert eligibility_client.batch_calls[-1]["payload"]["user_profile"]["gpa"] == 3.8
     assert eligibility_client.batch_calls[-1]["payload"]["user_profile"]["gpa_scale"] == 4.0

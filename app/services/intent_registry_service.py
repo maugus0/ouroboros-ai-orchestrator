@@ -458,6 +458,11 @@ class IntentRegistryService:
         if self._is_application_support_query(lowered):
             return "application_planning"
 
+        # Check for scholarship keywords BEFORE program discovery
+        # "scholarships from nus" should route to scholarship_search, not program_discovery
+        if any(token in lowered for token in ("scholarship", "funding", "grant", "financial aid")):
+            return "scholarship_search"
+
         if self._is_program_discovery_query(lowered):
             if self._has_application_keywords(lowered) and self._has_university_mention(lowered):
                 return "apply_to_named_school"
@@ -465,9 +470,6 @@ class IntentRegistryService:
 
         if any(token in lowered for token in ("profile", "my gpa", "my degree", "my background", "update my")):
             return "profile_completion"
-
-        if any(token in lowered for token in ("scholarship", "funding", "grant", "financial aid")):
-            return "scholarship_search"
 
         if any(token in lowered for token in ("eligible", "eligibility", "qualify", "qualified")):
             if self._is_program_discovery_query(lowered):

@@ -109,7 +109,7 @@ class ApplicationTrackingService:
             )
         latest = await self.aggregated_repo.get_latest_for_user(user_id=user_id)
         dashboard = latest.get("dashboard_view") if isinstance(latest, dict) else {}
-        profile = {}
+        profile: dict[str, Any] = {}
         if isinstance(dashboard, dict) and isinstance(dashboard.get("profile"), dict):
             profile = (
                 dashboard["profile"].get("details") if isinstance(dashboard["profile"].get("details"), dict) else {}
@@ -140,7 +140,7 @@ class ApplicationTrackingService:
         app = await self._get_application_or_404(user_id=user_id, application_id=application_id)
         latest = await self.aggregated_repo.get_latest_for_user(user_id=user_id)
         dashboard = latest.get("dashboard_view") if isinstance(latest, dict) else {}
-        profile = {}
+        profile: dict[str, Any] = {}
         if isinstance(dashboard, dict) and isinstance(dashboard.get("profile"), dict):
             details = dashboard["profile"].get("details")
             profile = details if isinstance(details, dict) else {}

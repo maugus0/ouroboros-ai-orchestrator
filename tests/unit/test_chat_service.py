@@ -1789,7 +1789,7 @@ async def test_send_message_metadata_includes_orchestrator_thoughts_gate_decisio
     ot = meta["orchestrator_thoughts"]
     assert ot["intent"] == "program_discovery"
     assert isinstance(ot["intent_confidence"], float)
-    assert "program_discovery" in ot["reasoning"]
+    assert "reasoning" not in ot
 
     # gate_decision shape
     gd = meta["gate_decision"]

@@ -558,7 +558,6 @@ class ChatService:
                 ),
                 "orchestrator_thoughts": self._build_orchestrator_thoughts(
                     detected_intent=detected_intent,
-                    content=content,
                 ),
                 "gate_decision": self._build_gate_decision(gate),
                 "routing_decision": self._build_routing_decision(
@@ -1418,15 +1417,12 @@ class ChatService:
         )
 
     @staticmethod
-    def _build_orchestrator_thoughts(*, detected_intent: str, content: str) -> dict[str, Any]:
+    def _build_orchestrator_thoughts(*, detected_intent: str) -> dict[str, Any]:
         normalized_intent = str(detected_intent or "unknown")
         confidence = 0.9 if normalized_intent != "profile_completion" else 0.8
-        preview = re.sub(r"\s+", " ", (content or "").strip())
-        preview = preview[:120] + ("..." if len(preview) > 120 else "")
         return {
             "intent": normalized_intent,
             "intent_confidence": confidence,
-            "reasoning": f"Detected intent '{normalized_intent}' from user message: '{preview}'",
         }
 
     @staticmethod
@@ -1464,9 +1460,8 @@ class ChatService:
             return "student-profile"
         return "orchestrator"
 
-    @classmethod
+    @staticmethod
     def _build_routing_decision(
-        cls,
         *,
         selected_agent: str,
         target_agent: Optional[str],

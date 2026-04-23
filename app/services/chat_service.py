@@ -1492,6 +1492,53 @@ class ChatService:
             "kaist": "KAIST",
         }
 
+    async def _fetch_profile_from_spa(
+        self,
+        profile_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Fetch full profile from SPA and extract fields. Returns empty dict on failure."""
+        try:
+            response = await self.profile_gate_service.student_profile_client.get_profile(
+                profile_id=profile_id,
+                user_id=user_id,
+            )
+            if not isinstance(response, dict):
+                return {}
+            profile = response.get("data") if isinstance(response.get("data"), dict) else response
+            if not isinstance(profile, dict):
+                return {}
+            fields = self._extract_profile_fields(profile)
+            logger.info(
+                "student_profile_fetched_for_agents",
+                user_id=user_id,
+                profile_id=profile_id,
+                fields=list(fields.keys()),
+            )
+            return fields
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "student_profile_fetch_for_agents_failed",
+                user_id=user_id,
+                profile_id=profile_id,
+                error=str(exc),
+            )
+            return {}
+
+    async def _resolve_profile_id_from_status(self, user_id: str) -> Optional[str]:
+        """Get profile_id from SPA status endpoint. Returns None on failure."""
+        try:
+            response = await self.profile_gate_service.student_profile_client.get_profile_status(
+                user_id=user_id,
+            )
+            if not isinstance(response, dict):
+                return None
+            data = response.get("data") or response
+            return data.get("profile_id") if isinstance(data, dict) else None
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("profile_id_resolution_failed", user_id=user_id, error=str(exc))
+            return None
+
     async def _get_student_profile_for_agents(
         self,
         user_id: str,
@@ -1501,7 +1548,7 @@ class ChatService:
 
         Always returns a dict (possibly partial). Merges data from:
         1. Gate profile_data (if available from prior profile gate evaluation)
-        2. SPA profile status response
+        2. SPA full profile (fetched by profile_id from gate)
         3. Orchestrator's user table (basic user data as fallback)
 
         Architecture principle: Even incomplete profiles should be sent to agents.
@@ -1514,53 +1561,52 @@ class ChatService:
         if isinstance(profile_data, dict):
             merged.update(self._extract_profile_fields(profile_data))
 
-        # 2. Try SPA profile status if gate didn't have profile_data
+        # 2. Fetch full profile from SPA if gate didn't have profile_data
         if not merged:
-            try:
-                status_response = await self.profile_gate_service.student_profile_client.get_profile_status(
-                    user_id=user_id,
-                )
-                if isinstance(status_response, dict):
-                    profile = (
-                        status_response.get("profile")
-                        or status_response.get("data", {}).get("profile")
-                        or status_response.get("data", {})
-                    )
-                    if isinstance(profile, dict):
-                        merged.update(self._extract_profile_fields(profile))
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning("student_profile_fetch_for_agents_failed", user_id=user_id, error=str(exc))
+            profile_id = gate.get("profile_id")
+            if not profile_id:
+                profile_id = await self._resolve_profile_id_from_status(user_id)
+            if profile_id:
+                merged.update(await self._fetch_profile_from_spa(profile_id, user_id))
 
         # 3. Enrich with orchestrator user data (basic info that might not be in SPA yet)
-        try:
-            pool = get_pool()
-            if pool:
-                user_repo = UserRepository(pool)
-                user = await user_repo.get_by_id(user_id)
-                if isinstance(user, dict):
-                    # Add basic user data that might be useful
-                    if not merged.get("full_name"):
-                        first_name = (user.get("first_name") or "").strip()
-                        last_name = (user.get("last_name") or "").strip()
-                        full_name = " ".join(p for p in [first_name, last_name] if p).strip()
-                        if full_name:
-                            merged["full_name"] = full_name
-
-                    if not merged.get("email") and user.get("email"):
-                        merged["email"] = user["email"]
-
-                    # Interest field could map to field_of_study
-                    if not merged.get("field_of_study") and user.get("interest"):
-                        merged["field_of_study"] = user["interest"]
-
-                    # Profession could be useful context
-                    if not merged.get("profession") and user.get("profession"):
-                        merged["profession"] = user["profession"]
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.debug("orchestrator_user_enrichment_failed", user_id=user_id, error=str(exc))
+        await self._enrich_profile_from_user_table(merged, user_id)
 
         # Filter out None and empty values to keep payload clean
         return {k: v for k, v in merged.items() if v is not None and v != "" and v != []}
+
+    async def _enrich_profile_from_user_table(self, merged: dict[str, Any], user_id: str) -> None:
+        """Enrich profile dict with data from orchestrator's user table."""
+        try:
+            pool = get_pool()
+            if not pool:
+                return
+            user_repo = UserRepository(pool)
+            user = await user_repo.get_by_id(user_id)
+            if not isinstance(user, dict):
+                return
+            self._apply_user_enrichment(merged, user)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.debug("orchestrator_user_enrichment_failed", user_id=user_id, error=str(exc))
+
+    @staticmethod
+    def _apply_user_enrichment(merged: dict[str, Any], user: dict[str, Any]) -> None:
+        """Apply user table fields to profile dict (mutates merged in place)."""
+        if not merged.get("full_name"):
+            first_name = (user.get("first_name") or "").strip()
+            last_name = (user.get("last_name") or "").strip()
+            full_name = " ".join(p for p in [first_name, last_name] if p).strip()
+            if full_name:
+                merged["full_name"] = full_name
+
+        if not merged.get("email") and user.get("email"):
+            merged["email"] = user["email"]
+
+        if not merged.get("field_of_study") and user.get("interest"):
+            merged["field_of_study"] = user["interest"]
+
+        if not merged.get("profession") and user.get("profession"):
+            merged["profession"] = user["profession"]
 
     @staticmethod
     def _extract_profile_fields(profile: dict[str, Any]) -> dict[str, Any]:

@@ -530,3 +530,134 @@ def test_profile_upload_invalidates_readiness_cache():
 
     assert response.status_code == 200
     assert invalidated == [("user-1", "profile_completion")]
+
+
+def test_profile_upload_with_chat_id_posts_notice_with_agent_reasoning():
+    """When chat_id is provided and agent_reasoning is present, the notice metadata
+    includes the allowlisted agent_reasoning dict and omits unknown keys."""
+    captured_notices: list[dict] = []
+
+    class _StubStudentProfileClient:
+        async def parse_document_upload(self, **_kwargs):
+            return {
+                "data": {
+                    "profile_id": "profile-1",
+                    "agent_reasoning": {
+                        "approach": "Parse and extract.",
+                        "decision_factors": ["factor 1", "factor 2"],
+                        "parse_decisions": ["full_name: accept"],
+                        "clarification_reasons": ["gpa: missing"],
+                        "next_field": "gpa",
+                        "confidence": 0.85,
+                        "internal_trace": "should be dropped",
+                    },
+                }
+            }
+
+    class _StubProfileGateService:
+        def invalidate_readiness_cache(self, _user_id: str, _intent: str | None = None):
+            pass
+
+    class _StubChatService:
+        def __init__(self, profile_gate_service):
+            self.profile_gate_service = profile_gate_service
+
+        async def post_assistant_notice(
+            self, *, user_id, chat_id, content, metadata
+        ):  # pylint: disable=unused-argument
+            captured_notices.append({"user_id": user_id, "chat_id": chat_id, "metadata": metadata})
+
+    def _stub_student_profile_client_factory():
+        return _StubStudentProfileClient()
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
+    def _stub_chat_service_factory(
+        profile_gate_service=Depends(workflows_api._get_profile_gate_service),
+    ):
+        return _StubChatService(profile_gate_service)
+
+    app.dependency_overrides[get_current_user_id] = _return_user_1
+    app.dependency_overrides[workflows_api._get_student_profile_client] = _stub_student_profile_client_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
+    app.dependency_overrides[workflows_api._get_chat_service] = _stub_chat_service_factory
+
+    response = client.post(
+        "/api/v1/workflows/profile-upload",
+        files={"file": ("cv.pdf", b"pdf-bytes", "application/pdf")},
+        data={"intent": "profile_completion", "document_type": "cv", "chat_id": "chat-1"},
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert len(captured_notices) == 1
+
+    notice = captured_notices[0]
+    assert notice["user_id"] == "user-1"
+    assert notice["chat_id"] == "chat-1"
+
+    metadata = notice["metadata"]
+    assert metadata["notice_type"] == "document_upload"
+    assert metadata["document_type"] == "cv"
+
+    ar = metadata["agent_reasoning"]
+    assert ar["approach"] == "Parse and extract."
+    assert ar["decision_factors"] == ["factor 1", "factor 2"]
+    assert ar["parse_decisions"] == ["full_name: accept"]
+    assert ar["clarification_reasons"] == ["gpa: missing"]
+    assert ar["next_field"] == "gpa"
+    assert ar["confidence"] == 0.85
+    assert "internal_trace" not in ar
+
+
+def test_profile_upload_with_chat_id_omits_agent_reasoning_when_absent():
+    """When agent_reasoning is not returned by the upstream service,
+    the key must not appear in the notice metadata at all."""
+    captured_notices: list[dict] = []
+
+    class _StubStudentProfileClient:
+        async def parse_document_upload(self, **_kwargs):
+            return {"data": {"profile_id": "profile-1"}}
+
+    class _StubProfileGateService:
+        def invalidate_readiness_cache(self, _user_id: str, _intent: str | None = None):
+            pass
+
+    class _StubChatService:
+        def __init__(self, profile_gate_service):
+            self.profile_gate_service = profile_gate_service
+
+        async def post_assistant_notice(
+            self, *, user_id, chat_id, content, metadata
+        ):  # pylint: disable=unused-argument
+            captured_notices.append({"metadata": metadata})
+
+    def _stub_student_profile_client_factory():
+        return _StubStudentProfileClient()
+
+    def _stub_profile_gate_service_factory():
+        return _StubProfileGateService()
+
+    def _stub_chat_service_factory(
+        profile_gate_service=Depends(workflows_api._get_profile_gate_service),
+    ):
+        return _StubChatService(profile_gate_service)
+
+    app.dependency_overrides[get_current_user_id] = _return_user_1
+    app.dependency_overrides[workflows_api._get_student_profile_client] = _stub_student_profile_client_factory
+    app.dependency_overrides[workflows_api._get_profile_gate_service] = _stub_profile_gate_service_factory
+    app.dependency_overrides[workflows_api._get_chat_service] = _stub_chat_service_factory
+
+    response = client.post(
+        "/api/v1/workflows/profile-upload",
+        files={"file": ("cv.pdf", b"pdf-bytes", "application/pdf")},
+        data={"intent": "profile_completion", "document_type": "cv", "chat_id": "chat-1"},
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert len(captured_notices) == 1
+    assert "agent_reasoning" not in captured_notices[0]["metadata"]

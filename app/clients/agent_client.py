@@ -104,6 +104,7 @@ class AgentClient:
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> Any:
         headers = self._build_headers(
             trace_id=trace_id,
@@ -128,7 +129,13 @@ class AgentClient:
             before_sleep=lambda state: self._log_before_sleep(state, method, url),
         )
 
-        async with self._create_http_client() as client:
+        client_context = (
+            httpx.AsyncClient(timeout=timeout_seconds)
+            if timeout_seconds is not None
+            else self._create_http_client()
+        )
+
+        async with client_context as client:
             try:
                 async for attempt in retryer:
                     attempt_number = attempt.retry_state.attempt_number

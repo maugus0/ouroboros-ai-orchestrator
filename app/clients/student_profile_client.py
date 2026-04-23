@@ -68,6 +68,30 @@ class StudentProfileClient(AgentClient):
             ),
         )
 
+    async def get_profile(
+        self,
+        profile_id: str,
+        *,
+        user_id: str,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Fetch full profile details by profile id."""
+        return await self.request(
+            "GET",
+            f"/api/v1/profiles/{profile_id}",
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
     async def get_profile_clarifications(
         self,
         profile_id: str,

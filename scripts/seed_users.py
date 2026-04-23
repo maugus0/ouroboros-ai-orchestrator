@@ -28,6 +28,7 @@ load_dotenv()
 
 SEED_USERS = [
     {
+        "id": "11111111-1111-4111-8111-111111111111",
         "username": "Maugus",
         "first_name": "Ahan",
         "last_name": "Jaiswal",
@@ -37,6 +38,7 @@ SEED_USERS = [
         "password": "Admin123@",
     },
     {
+        "id": "22222222-2222-4222-8222-222222222222",
         "username": "NPT",
         "first_name": "Phu Truong",
         "last_name": "Nguyen",
@@ -46,6 +48,7 @@ SEED_USERS = [
         "password": "Admin123@",
     },
     {
+        "id": "33333333-3333-4333-8333-333333333333",
         "username": "Feri",
         "first_name": "Feri",
         "last_name": "Setiawan",
@@ -55,6 +58,7 @@ SEED_USERS = [
         "password": "Admin123@",
     },
     {
+        "id": "44444444-4444-4444-8444-444444444444",
         "username": "Stella",
         "first_name": "Xingyuan",
         "last_name": "Liu",
@@ -64,6 +68,7 @@ SEED_USERS = [
         "password": "Admin123@",
     },
     {
+        "id": "55555555-5555-4555-8555-555555555555",
         "username": "Lantya",
         "first_name": "Lanting",
         "last_name": "Zhao",
@@ -98,30 +103,58 @@ def _hash_password(password: str) -> str:
 
 
 def ensure_user(connection, user: dict) -> str:
-    """Insert user if not exists (idempotent on username). Returns user UUID."""
+    """Insert or refresh a local seed user. Returns user UUID."""
     cursor = connection.cursor(dictionary=True)
     cursor.execute("SELECT id FROM users WHERE username = %s LIMIT 1", (user["username"],))
     row = cursor.fetchone()
 
     full_name = f"{user['first_name']} {user['last_name']}"
+    password_hash = _hash_password(user["password"])
 
     if row:
-        logger.info("  Already exists: %s (%s)", user["username"], full_name)
+        cursor.execute(
+            """
+            UPDATE users
+            SET phone_verified = TRUE,
+                profile_completed = TRUE,
+                is_active = TRUE,
+                mfa_enabled = FALSE,
+                password_hash = %s,
+                first_name = %s,
+                last_name = %s,
+                email = %s,
+                phone_number = %s,
+                phone_country_code = %s,
+                updated_at = UTC_TIMESTAMP()
+            WHERE id = %s
+            """,
+            (
+                password_hash,
+                user["first_name"],
+                user["last_name"],
+                user["email"],
+                user["phone_number"],
+                user["phone_country_code"],
+                row["id"],
+            ),
+        )
+        connection.commit()
+        logger.info("  Refreshed: %s (%s) — %s", user["username"], full_name, row["id"])
         cursor.close()
         return row["id"]
 
-    user_id = str(uuid.uuid4())
+    user_id = user.get("id") or str(uuid.uuid4())
     cursor.execute(
         """INSERT INTO users (id, username, phone_number, phone_country_code,
              phone_verified, password_hash, first_name, last_name, email,
              profile_completed, is_active)
-        VALUES (%s, %s, %s, %s, FALSE, %s, %s, %s, %s, FALSE, TRUE)""",
+        VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s, TRUE, TRUE)""",
         (
             user_id,
             user["username"],
             user["phone_number"],
             user["phone_country_code"],
-            _hash_password(user["password"]),
+            password_hash,
             user["first_name"],
             user["last_name"],
             user["email"],

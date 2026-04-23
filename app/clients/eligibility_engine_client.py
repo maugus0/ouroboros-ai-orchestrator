@@ -42,7 +42,7 @@ class EligibilityEngineClient(AgentClient):
             trace_id=trace_id,
         )
 
-    async def check_eligibility(
+    async def evaluate(
         self,
         user_id: str,
         payload: dict[str, Any],
@@ -51,10 +51,10 @@ class EligibilityEngineClient(AgentClient):
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Check eligibility for programs/scholarships based on user profile."""
+        """Evaluate a single program/scholarship match."""
         return await self.request(
             "POST",
-            "/api/v1/eligibility/check",
+            "/api/v1/eligibility/evaluate",
             json=payload,
             trace_id=trace_id,
             user_id=user_id,
@@ -65,4 +65,47 @@ class EligibilityEngineClient(AgentClient):
                 session_id=session_id,
                 trace_id=trace_id,
             ),
+        )
+
+    async def evaluate_batch(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Evaluate multiple matches in a single batch request."""
+        return await self.request(
+            "POST",
+            "/api/v1/eligibility/evaluate/batch",
+            json=payload,
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def check_eligibility(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Backward-compatible alias for single evaluation."""
+        return await self.evaluate(
+            user_id=user_id,
+            payload=payload,
+            trace_id=trace_id,
+            session_id=session_id,
+            authorization=authorization,
         )

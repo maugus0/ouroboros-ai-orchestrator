@@ -191,20 +191,31 @@ class ProgramDiscoveryClient(AgentClient):
         self,
         *,
         student_profile: dict[str, Any],
-        filters: Optional[dict[str, Any]] = None,
+        target_field: str,
+        target_degree: Optional[str] = None,
+        country_preferences: Optional[list[str]] = None,
+        max_tuition_usd: Optional[float] = None,
+        deadline_cutoff: Optional[str] = None,
         limit: int = 10,
         user_id: str,
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
     ) -> dict[str, Any]:
-        """POST /programs/rank — Rank programs using weighted algorithm against a profile."""
+        """POST /programs/rank — Rank programs against a profile."""
         payload: dict[str, Any] = {
             "student_profile": student_profile,
+            "target_field": target_field,
             "limit": limit,
         }
-        if filters:
-            payload["filters"] = filters
+        if target_degree:
+            payload["target_degree"] = target_degree
+        if country_preferences:
+            payload["country_preferences"] = country_preferences
+        if max_tuition_usd is not None:
+            payload["max_tuition_usd"] = max_tuition_usd
+        if deadline_cutoff:
+            payload["deadline_cutoff"] = deadline_cutoff
         return await self.request(
             "POST",
             "/programs/rank",

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.core.logging import get_logger
+from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS
 
 logger = get_logger(__name__)
 
@@ -454,6 +455,9 @@ class IntentRegistryService:
         ):
             return "profile_completion"
 
+        if self._is_application_support_query(lowered):
+            return "application_planning"
+
         if self._is_program_discovery_query(lowered):
             if self._has_application_keywords(lowered) and self._has_university_mention(lowered):
                 return "apply_to_named_school"
@@ -469,12 +473,6 @@ class IntentRegistryService:
             if self._is_program_discovery_query(lowered):
                 return "program_discovery"
             return "eligibility_check"
-
-        if any(
-            token in lowered
-            for token in ("application plan", "application timeline", "statement of purpose", "cover letter")
-        ):
-            return "application_planning"
 
         return "out_of_scope"
 
@@ -499,6 +497,11 @@ class IntentRegistryService:
             return True
 
         return False
+
+    @staticmethod
+    def _is_application_support_query(lowered: str) -> bool:
+        """Check if query should be handled by application-support."""
+        return any(token in lowered for token in APPLICATION_SUPPORT_KEYWORDS)
 
     def _has_university_mention(self, lowered: str) -> bool:
         """Check if query mentions a university by name or pattern."""

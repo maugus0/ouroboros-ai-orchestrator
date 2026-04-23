@@ -50,7 +50,7 @@ SEED_USERS = [
         "first_name": "Feri",
         "last_name": "Setiawan",
         "email": "feri@gmail.com",
-        "phone_number": "+6581234502",
+        "phone_number": "+6585027891",
         "phone_country_code": "SG",
         "password": "Admin123@",
     },

@@ -42,7 +42,7 @@ class ApplicationSupportClient(AgentClient):
             trace_id=trace_id,
         )
 
-    async def generate_application_guidance(
+    async def generate_sop(
         self,
         user_id: str,
         payload: dict[str, Any],
@@ -51,10 +51,133 @@ class ApplicationSupportClient(AgentClient):
         session_id: Optional[str] = None,
         authorization: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Generate application guidance and preparation materials."""
+        """Generate a Statement of Purpose via application-support."""
         return await self.request(
             "POST",
-            "/api/v1/applications/guidance",
+            "/api/v1/applications/generate-sop",
+            json=payload,
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def generate_cover_letter(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Generate a cover letter via the versioned application-support API."""
+        return await self.request(
+            "POST",
+            "/api/v1/applications/generate-cover-letter",
+            json=payload,
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def create_checklist(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create an application checklist."""
+        return await self.request(
+            "POST",
+            "/api/v1/applications/checklist",
+            json=payload,
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def list_checklists(
+        self,
+        user_id: str,
+        *,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """List application checklists for a user."""
+        return await self.request(
+            "GET",
+            f"/api/v1/applications/checklist/{user_id}",
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def list_deadlines(
+        self,
+        user_id: str,
+        *,
+        approaching_days: int = 30,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """List application deadlines for a user."""
+        return await self.request(
+            "GET",
+            f"/api/v1/applications/deadlines/{user_id}",
+            params={"approaching_days": approaching_days},
+            trace_id=trace_id,
+            user_id=user_id,
+            session_id=session_id,
+            authorization=self._resolve_authorization(
+                authorization=authorization,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+
+    async def sync_deadlines(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        trace_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorization: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Sync application deadlines from program/scholarship payloads."""
+        return await self.request(
+            "POST",
+            "/api/v1/applications/deadlines/sync",
             json=payload,
             trace_id=trace_id,
             user_id=user_id,

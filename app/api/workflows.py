@@ -1,7 +1,7 @@
 """Workflow visibility endpoints for readiness, uploads, and orchestration state."""
 
 import base64
-from typing import Any
+from typing import Any, Awaitable, Callable, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
@@ -94,7 +94,6 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
     file: UploadFile = File(...),
     intent: str = Form(default="profile_completion"),
     document_type: str = Form(default="cv"),
-    target_degree_hint: str | None = Form(default=None),
     run_gap_analysis: bool = Form(default=False),
     chat_id: str | None = Form(default=None),
     user_id: str = Depends(get_current_user_id),
@@ -118,26 +117,53 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
             file_content_base64=file_content_base64,
             intent=intent,
             document_type=document_type,
-            target_degree_hint=target_degree_hint,
             run_gap_analysis=run_gap_analysis,
         )
+        profile_data = None
+        if isinstance(result, dict):
+            nested_data = result.get("data")
+            profile_data = nested_data if isinstance(nested_data, dict) else result
+        profile_id = profile_data.get("profile_id") if isinstance(profile_data, dict) else None
+        if isinstance(profile_data, dict) and isinstance(profile_id, str) and profile_id:
+            get_profile_clarifications = getattr(profile_gate_service, "get_profile_clarifications", None)
+            if callable(get_profile_clarifications):
+                typed_get_profile_clarifications = cast(
+                    Callable[[str, str], Awaitable[dict[str, Any] | None]],
+                    get_profile_clarifications,
+                )
+                clarifications = await typed_get_profile_clarifications(  # pylint: disable=not-callable
+                    user_id, profile_id
+                )
+                if isinstance(clarifications, dict):
+                    profile_data["clarification_queue"] = clarifications.get(
+                        "clarification_queue", profile_data.get("clarification_queue", [])
+                    )
+                    profile_data["react_decision_trace"] = clarifications.get(
+                        "react_decision_trace", profile_data.get("react_decision_trace", {})
+                    )
         profile_gate_service.invalidate_readiness_cache(user_id, intent)
 
         if chat_id:
             notice_content = _build_document_upload_notice(result, document_type, filename)
             notice_title = _build_document_upload_title(document_type, filename)
+            parse_agent_reasoning = None
+            if isinstance(profile_data, dict) and isinstance(profile_data.get("agent_reasoning"), dict):
+                parse_agent_reasoning = _extract_agent_reasoning(profile_data["agent_reasoning"])
+            notice_metadata: dict[str, Any] = {
+                "notice_type": "document_upload",
+                "notice_title": notice_title,
+                "document_type": document_type,
+                "file_name": filename,
+                "intent": intent,
+                "upload_result": result if isinstance(result, dict) else None,
+            }
+            if parse_agent_reasoning:
+                notice_metadata["agent_reasoning"] = parse_agent_reasoning
             await chat_service.post_assistant_notice(
                 user_id=user_id,
                 chat_id=chat_id,
                 content=notice_content,
-                metadata={
-                    "notice_type": "document_upload",
-                    "notice_title": notice_title,
-                    "document_type": document_type,
-                    "file_name": filename,
-                    "intent": intent,
-                    "upload_result": result if isinstance(result, dict) else None,
-                },
+                metadata=notice_metadata,
             )
 
         return result
@@ -176,6 +202,40 @@ async def upload_profile_document(  # pylint: disable=too-many-arguments,too-man
                     notice_error=str(notice_exc),
                 )
         raise
+
+
+def _extract_agent_reasoning(raw: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist-extract known agent_reasoning fields before persisting to chat metadata.
+
+    The student-profile service already constructs this dict from controlled sources,
+    but we extract only the expected fields to guard against schema drift or unexpected keys.
+    """
+    _max_str = 500
+    _max_list_items = 20
+    _max_item_len = 300
+
+    def _safe_str(value: object) -> str | None:
+        return str(value)[:_max_str] if isinstance(value, str) else None
+
+    def _safe_str_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item)[:_max_item_len] for item in value if isinstance(item, str)][:_max_list_items]
+
+    result: dict[str, Any] = {}
+    approach = _safe_str(raw.get("approach"))
+    if approach:
+        result["approach"] = approach
+    result["decision_factors"] = _safe_str_list(raw.get("decision_factors"))
+    result["parse_decisions"] = _safe_str_list(raw.get("parse_decisions"))
+    result["clarification_reasons"] = _safe_str_list(raw.get("clarification_reasons"))
+    next_field = _safe_str(raw.get("next_field"))
+    if next_field is not None:
+        result["next_field"] = next_field
+    confidence = raw.get("confidence")
+    if isinstance(confidence, (int, float)):
+        result["confidence"] = float(confidence)
+    return result
 
 
 def _build_document_upload_notice(result: dict[str, Any] | None, document_type: str, filename: str) -> str:

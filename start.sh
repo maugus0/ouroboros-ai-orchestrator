@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON_BIN=""
 
 for VENV_DIR in "${SCRIPT_DIR}/.venv" "${SCRIPT_DIR}/venv" "${SCRIPT_DIR}/env"; do
-    if [ -d "${VENV_DIR}" ] && [ -f "${VENV_DIR}/bin/activate" ]; then
+    if [ -d "${VENV_DIR}" ] && [ -f "${VENV_DIR}/bin/activate" ] && [ -x "${VENV_DIR}/bin/python" ]; then
         source "${VENV_DIR}/bin/activate"
         PYTHON_BIN="${VENV_DIR}/bin/python"
         break
@@ -24,5 +24,12 @@ if [ -z "${PYTHON_BIN}" ]; then
 fi
 
 cd "${SCRIPT_DIR}"
+
+if [ "${RUN_STARTUP_SCRIPTS:-true}" = "true" ]; then
+    echo "RUN_STARTUP_SCRIPTS=true; running startup migrations..."
+    "${PYTHON_BIN}" scripts/run_migrations.py
+else
+    echo "Skipping startup migrations (set RUN_STARTUP_SCRIPTS=true to enable)."
+fi
 
 "${PYTHON_BIN}" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

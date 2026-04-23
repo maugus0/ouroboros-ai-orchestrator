@@ -388,7 +388,7 @@ class ResultAggregationService:
         dashboard = self._build_dashboard_view(
             workflow_id=workflow_id,
             version=final_version,
-            status=final_status,
+            result_status=final_status,
             profile_output=profile_output,
             program_output=program_output,
             scholarship_output=scholarship_output,
@@ -406,7 +406,7 @@ class ResultAggregationService:
                 self._to_result_payload(
                     workflow_id=workflow_id,
                     user_id=user_id,
-                    status=final_status,
+                    result_status=final_status,
                     version=final_version,
                     is_latest=True,
                     dashboard=dashboard,
@@ -454,7 +454,7 @@ class ResultAggregationService:
         payload = self._to_result_payload(
             workflow_id=workflow_id,
             user_id=user_id,
-            status=str(latest.get("status") or "failed"),
+            result_status=str(latest.get("status") or "failed"),
             version=int(latest.get("result_version") or 1),
             is_latest=bool(latest.get("is_latest")),
             dashboard=dashboard,
@@ -885,7 +885,7 @@ class ResultAggregationService:
         dashboard = self._build_dashboard_view(
             workflow_id=workflow_id,
             version=version,
-            status=snapshot_status,
+            result_status=snapshot_status,
             profile_output=profile_output,
             program_output=program_output,
             scholarship_output=scholarship_output,
@@ -1140,7 +1140,7 @@ class ResultAggregationService:
         *,
         workflow_id: str,
         version: int,
-        status: str,
+        result_status: str,
         profile_output: Optional[dict[str, Any]],
         program_output: Optional[dict[str, Any]],
         scholarship_output: Optional[dict[str, Any]],
@@ -1188,7 +1188,7 @@ class ResultAggregationService:
         )
         dashboard = {
             "workflow_id": workflow_id,
-            "status": status,
+            "status": result_status,
             "version": version,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "profile": {
@@ -1220,7 +1220,7 @@ class ResultAggregationService:
         *,
         workflow_id: str,
         user_id: str,
-        status: str,
+        result_status: str,
         version: int,
         is_latest: bool,
         dashboard: dict[str, Any],
@@ -1236,7 +1236,7 @@ class ResultAggregationService:
         return {
             "workflow_id": workflow_id,
             "user_id": user_id,
-            "status": status,
+            "status": result_status,
             "version": version,
             "is_latest": is_latest,
             "dashboard": dashboard,

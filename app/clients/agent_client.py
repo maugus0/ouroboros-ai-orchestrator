@@ -130,9 +130,7 @@ class AgentClient:
         )
 
         client_context = (
-            httpx.AsyncClient(timeout=timeout_seconds)
-            if timeout_seconds is not None
-            else self._create_http_client()
+            httpx.AsyncClient(timeout=timeout_seconds) if timeout_seconds is not None else self._create_http_client()
         )
 
         async with client_context as client:

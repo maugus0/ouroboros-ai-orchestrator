@@ -76,18 +76,28 @@ class ApplicationTrackingService:
         deadline_output = await self._safe_sync_deadline(user_id=user_id, app=app)
 
         if checklist_output is not None or deadline_output is not None:
-            app = await self.application_repo.update_outputs(
-                user_id=user_id,
-                application_id=app["id"],
-                checklist_output=checklist_output,
-                deadline_output=deadline_output,
-            ) or app
+            app = (
+                await self.application_repo.update_outputs(
+                    user_id=user_id,
+                    application_id=app["id"],
+                    checklist_output=checklist_output,
+                    deadline_output=deadline_output,
+                )
+                or app
+            )
         return app
 
-    async def update_application(self, *, user_id: str, application_id: str, body: TrackedApplicationUpdate) -> dict[str, Any]:
-        app = await self.application_repo.update_status(user_id=user_id, application_id=application_id, status=body.status)
+    async def update_application(
+        self, *, user_id: str, application_id: str, body: TrackedApplicationUpdate
+    ) -> dict[str, Any]:
+        app = await self.application_repo.update_status(
+            user_id=user_id, application_id=application_id, status=body.status
+        )
         if app is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Application not found",
+            )
         return app
 
     async def generate_sop(self, *, user_id: str, application_id: str) -> dict[str, Any]:
@@ -101,13 +111,16 @@ class ApplicationTrackingService:
         dashboard = latest.get("dashboard_view") if isinstance(latest, dict) else {}
         profile = {}
         if isinstance(dashboard, dict) and isinstance(dashboard.get("profile"), dict):
-            profile = dashboard["profile"].get("details") if isinstance(dashboard["profile"].get("details"), dict) else {}
+            profile = (
+                dashboard["profile"].get("details") if isinstance(dashboard["profile"].get("details"), dict) else {}
+            )
 
         payload = {
             "user_id": user_id,
             "program_id": app["entity_id"] if app["entity_type"] == "program" else None,
             "user_profile": profile,
-            "target_program": app.get("source_data") or {"program_name": app["title"], "university": app.get("provider")},
+            "target_program": app.get("source_data")
+            or {"program_name": app["title"], "university": app.get("provider")},
             "match_attribution": self._extract_match_attribution(app),
         }
         try:
@@ -200,12 +213,17 @@ class ApplicationTrackingService:
             "program_requirements": self._requirements_text(app.get("source_data")),
             "target_program": app.get("source_data") or {},
         }
-        return await self.application_support_client.create_checklist(user_id=user_id, payload=payload)
+        return await self.application_support_client.create_checklist(
+            user_id=user_id,
+            payload=payload,
+        )
 
     async def _sync_deadline(self, *, user_id: str, app: dict[str, Any]) -> dict[str, Any]:
         source = dict(app.get("source_data") or {})
         if app.get("deadline") and not source.get("deadline"):
-            source["deadline"] = app["deadline"].isoformat() if isinstance(app["deadline"], date) else str(app["deadline"])
+            source["deadline"] = (
+                app["deadline"].isoformat() if isinstance(app["deadline"], date) else str(app["deadline"])
+            )
         payload = {
             "user_id": user_id,
             "programs": [source] if app["entity_type"] == "program" else [],

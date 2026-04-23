@@ -10,6 +10,9 @@ from fastapi.testclient import TestClient
 from app.api import results as results_api
 from app.middleware.auth_middleware import get_current_user_id
 
+# pylint: disable=protected-access
+
+
 app = FastAPI()
 app.include_router(results_api.router)
 client = TestClient(app)

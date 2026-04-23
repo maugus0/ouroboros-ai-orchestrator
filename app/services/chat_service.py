@@ -21,6 +21,7 @@ from app.clients.application_support_client import ApplicationSupportClient
 from app.clients.program_discovery_client import ProgramDiscoveryClient
 from app.core.database import get_pool
 from app.core.logging import get_logger
+from app.models.results import DiscoverRequest
 from app.repositories.agent_call_log_repo import AgentCallLogRepository
 from app.repositories.chat_repo import ChatRepository
 from app.repositories.message_repo import MessageRepository
@@ -30,7 +31,6 @@ from app.services.agent_availability_service import AgentAvailabilityService
 from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS, detect_application_support_action
 from app.services.intent_registry_service import IntentRegistryService
 from app.services.profile_gate_service import ProfileGateService
-from app.models.results import DiscoverRequest
 from app.services.result_aggregation_service import ResultAggregationService
 
 logger = get_logger(__name__)

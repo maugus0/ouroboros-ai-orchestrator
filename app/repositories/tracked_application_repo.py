@@ -101,7 +101,9 @@ class TrackedApplicationRepository:
         return self._normalize_row(dict(row)) if row else None
 
     async def update_status(self, *, user_id: str, application_id: str, status: str) -> Optional[dict[str, Any]]:
-        query = "UPDATE tracked_applications SET status = %s, updated_at = UTC_TIMESTAMP(6) WHERE user_id = %s AND id = %s"
+        query = (
+            "UPDATE tracked_applications SET status = %s, updated_at = UTC_TIMESTAMP(6) WHERE user_id = %s AND id = %s"
+        )
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(query, (status, user_id, application_id))

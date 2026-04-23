@@ -35,7 +35,10 @@ class AggregatedResultRepository:
 
     async def get_next_version(self, workflow_run_id: str) -> int:
         """Return next version number for a workflow."""
-        query = "SELECT COALESCE(MAX(result_version), 0) + 1 AS next_version FROM aggregated_results WHERE workflow_run_id = %s"
+        query = (
+            "SELECT COALESCE(MAX(result_version), 0) + 1 AS next_version "
+            "FROM aggregated_results WHERE workflow_run_id = %s"
+        )
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, (workflow_run_id,))

@@ -732,7 +732,11 @@ class ChatService:
                 routed_to_react_clarification = collected_from_chat is not None
 
         if not routed_to_react_clarification:
-            missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
+            # Include both required AND optional missing fields for extraction
+            # This allows users to provide optional fields like target_study_country voluntarily
+            missing_required = _as_string_list(gate.get("missing_required_fields") or [])
+            missing_optional = _as_string_list(gate.get("missing_optional_fields") or [])
+            missing_fields = list(set(missing_required + missing_optional))
             collected_from_chat = await self.profile_gate_service.collect_profile_updates_from_chat(
                 user_id=user_id,
                 content=content,
@@ -1092,7 +1096,7 @@ class ChatService:
         content: str,
         workflow_run_id: str,
         gate: dict[str, Any],
-    ) -> str:
+    ) -> dict[str, Any]:
         """Call Scholarship Discovery Agent to search scholarships.
 
         Uses SDA's /api/v1/scholarships/search endpoint which filters
@@ -1152,10 +1156,17 @@ class ChatService:
                 latency_ms=self._elapsed_ms(started_at),
             )
 
-            return self._format_scholarship_search_response(
+            formatted_answer = self._format_scholarship_search_response(
                 result,
                 program_context=program_context,
             )
+            # Extract agent_reasoning from SDA response
+            agent_reasoning = result.get("agent_reasoning")
+            return {
+                "answer": formatted_answer,
+                "agent_reasoning": agent_reasoning,
+                "source": "scholarship_discovery",
+            }
 
         except AgentClientError as exc:
             await self._record_scholarship_discovery_call(
@@ -1183,10 +1194,14 @@ class ChatService:
                 status_code=exc.status_code,
                 error=str(exc),
             )
-            return (
-                "I tried to search scholarships for you, but the scholarship discovery "
-                "service encountered an issue. Please try again in a moment."
-            )
+            return {
+                "answer": (
+                    "I tried to search scholarships for you, but the scholarship discovery "
+                    "service encountered an issue. Please try again in a moment."
+                ),
+                "agent_reasoning": None,
+                "source": "scholarship_discovery",
+            }
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(
                 "scholarship_discovery_unexpected_error",
@@ -1194,7 +1209,11 @@ class ChatService:
                 chat_id=chat_id,
                 error=str(exc),
             )
-            return "I ran into an unexpected issue while searching for scholarships. Please try again shortly."
+            return {
+                "answer": "I ran into an unexpected issue while searching for scholarships. Please try again shortly.",
+                "agent_reasoning": None,
+                "source": "scholarship_discovery",
+            }
 
     async def _extract_program_context_for_scholarships(
         self,
@@ -1247,13 +1266,34 @@ class ChatService:
                 logger.info("scholarship_provider_extracted", provider=provider_name, user_id=user_id)
                 break
 
-        # 2. Extract university mentions
+        # 2. Extract university mentions and infer country
         university_patterns = self._get_university_patterns()
+        university_country_map = self._get_university_country_map()
         mentioned_university = None
+        inferred_country = None
         for pattern, university_name in university_patterns.items():
             if pattern in content_lower:
                 mentioned_university = university_name
                 context["mentioned_university"] = university_name
+                # Infer country from university
+                inferred_country = university_country_map.get(university_name)
+                if inferred_country:
+                    context["inferred_country"] = inferred_country
+                    logger.info(
+                        "country_inferred_from_university",
+                        university=university_name,
+                        country=inferred_country,
+                        user_id=user_id,
+                    )
+                # If no external provider (Fulbright etc) was found, use university as provider
+                # This allows "NUS scholarships" to find scholarships where provider="National University of Singapore"
+                if not context["provider"]:
+                    context["provider"] = university_name
+                    logger.info(
+                        "university_used_as_scholarship_provider",
+                        university=university_name,
+                        user_id=user_id,
+                    )
                 break
 
         # 3. Extract field of study mentions
@@ -1492,6 +1532,64 @@ class ChatService:
             "kaist": "KAIST",
         }
 
+    @staticmethod
+    def _get_university_country_map() -> dict[str, str]:
+        """Return mapping of canonical university names to their countries."""
+        return {
+            # US Universities
+            "Massachusetts Institute of Technology": "United States",
+            "Stanford University": "United States",
+            "Harvard University": "United States",
+            "Yale University": "United States",
+            "Princeton University": "United States",
+            "Columbia University": "United States",
+            "University of California, Berkeley": "United States",
+            "University of California, Los Angeles": "United States",
+            "California Institute of Technology": "United States",
+            "Carnegie Mellon University": "United States",
+            "New York University": "United States",
+            "University of Pennsylvania": "United States",
+            "Cornell University": "United States",
+            "Duke University": "United States",
+            "Northwestern University": "United States",
+            "University of Chicago": "United States",
+            "Johns Hopkins University": "United States",
+            "Georgia Institute of Technology": "United States",
+            # UK Universities
+            "University of Oxford": "United Kingdom",
+            "University of Cambridge": "United Kingdom",
+            "Imperial College London": "United Kingdom",
+            "University College London": "United Kingdom",
+            "London School of Economics": "United Kingdom",
+            "University of Edinburgh": "United Kingdom",
+            "University of Manchester": "United Kingdom",
+            "King's College London": "United Kingdom",
+            # Singapore Universities
+            "National University of Singapore": "Singapore",
+            "Nanyang Technological University": "Singapore",
+            "Singapore Management University": "Singapore",
+            "Singapore University of Technology and Design": "Singapore",
+            # Switzerland
+            "ETH Zurich": "Switzerland",
+            "EPFL": "Switzerland",
+            # Canada
+            "University of Toronto": "Canada",
+            "McGill University": "Canada",
+            # Australia
+            "University of Melbourne": "Australia",
+            "University of Sydney": "Australia",
+            "Australian National University": "Australia",
+            # China
+            "Tsinghua University": "China",
+            "Peking University": "China",
+            # Japan
+            "University of Tokyo": "Japan",
+            "Kyoto University": "Japan",
+            # South Korea
+            "Seoul National University": "South Korea",
+            "KAIST": "South Korea",
+        }
+
     async def _fetch_profile_from_spa(
         self,
         profile_id: str,
@@ -1688,7 +1786,10 @@ class ChatService:
             context_parts.append(program_context["mentioned_university"])
         if program_context.get("mentioned_field"):
             context_parts.append(program_context["mentioned_field"])
-        if program_context.get("provider"):
+        # Only add provider if it's different from the university (to avoid duplication)
+        if program_context.get("provider") and program_context.get("provider") != program_context.get(
+            "mentioned_university"
+        ):
             context_parts.append(program_context["provider"])
 
         context_desc = " ".join(context_parts) if context_parts else "your profile"
@@ -1718,9 +1819,19 @@ class ChatService:
         if program_context.get("program_ids"):
             programs = program_context.get("programs", [])
             if programs:
-                program_names = [p.get("name") or p.get("institution_name") for p in programs[:3] if p]
-                program_list = ", ".join(filter(None, program_names))
-                header = f"I found {total} scholarship{'s' if total != 1 else ''} linked to **{program_list}**:\n"
+                # Deduplicate institution names while preserving order
+                seen_names: set[str] = set()
+                unique_names: list[str] = []
+                for p in programs[:5]:
+                    name = p.get("institution_name") or p.get("name")
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        unique_names.append(name)
+                program_list = ", ".join(unique_names[:3]) if unique_names else None
+                if program_list:
+                    header = f"I found {total} scholarship{'s' if total != 1 else ''} linked to **{program_list}**:\n"
+                else:
+                    header = f"I found {total} scholarship{'s' if total != 1 else ''} for the programs you mentioned:\n"
             else:
                 header = f"I found {total} scholarship{'s' if total != 1 else ''} for the programs you mentioned:\n"
         elif program_context.get("provider"):
@@ -2090,14 +2201,14 @@ class ChatService:
                 gate=gate,
             )
         if target_agent == "scholarship-discovery" and detected_intent == "scholarship_search":
-            result = await self._handle_scholarship_search(
+            # _handle_scholarship_search now returns dict with answer, agent_reasoning, source
+            return await self._handle_scholarship_search(
                 user_id=user_id,
                 chat_id=chat_id,
                 content=content,
                 workflow_run_id=workflow_run_id,
                 gate=gate,
             )
-            return {"answer": result, "agent_reasoning": None, "source": "scholarship_discovery"}
         if target_agent == "application-support":
             result = await self._build_application_support_response(
                 user_id=user_id,

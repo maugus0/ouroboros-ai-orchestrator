@@ -1068,6 +1068,17 @@ class ProfileGateService:
                 confidence = 0.9 if len(countries) == 1 else 0.68
                 reason = "single_country_candidate" if len(countries) == 1 else "ambiguous_country_candidates"
                 set_candidate("target_study_country", country_value, confidence, reason, source_span=text)
+            else:
+                # Try to infer country from university mentions (e.g., "MIT" → "United States")
+                inferred_country = cls._infer_country_from_university(text)
+                if inferred_country:
+                    set_candidate(
+                        "target_study_country",
+                        inferred_country,
+                        0.88,
+                        "inferred_from_university_mention",
+                        source_span=text,
+                    )
 
         if "enrollment_timeline" in missing:
             timelines = cls._extract_timeline_candidates(text)
@@ -1261,6 +1272,11 @@ class ProfileGateService:
             r"(?:study|studying|apply|applying|target|prefer|want|plan(?:ning)?|looking)\s+"
             r"(?:in|to)\s+([A-Za-z][A-Za-z\s\-']{2,80})",
             r"(?:country|destination)\s*(?:is|:)?\s*([A-Za-z][A-Za-z\s\-']{2,80})",
+            # Match "[Country] is my preferred country" or "preferred country is [Country]"
+            r"([A-Za-z][A-Za-z\s\-']{2,40})\s+is\s+(?:my\s+)?(?:preferred|target|chosen|desired)\s+"
+            r"(?:country|destination|place)",
+            # Match "my preferred country is [Country]" (already covered above) or "prefer [Country]"
+            r"\bprefer(?:red)?\s+(?:to\s+study\s+in\s+)?([A-Za-z][A-Za-z\s\-']{2,40})\b",
         ]
         trailing_noise = re.compile(
             r"\b(next year|this year|soon|eventually|maybe|for now|for admission|for intake)\b.*$",
@@ -1278,6 +1294,13 @@ class ProfileGateService:
                     normalized = cls._normalize_country_candidate(cleaned)
                     if normalized:
                         found.append(normalized)
+
+        # If text is short (likely a direct answer to "what's your preferred country?"),
+        # try to normalize the entire text as a country name
+        if not found and len(text.split()) <= 3:
+            potential_country = cls._normalize_country_candidate(text)
+            if potential_country:
+                found.append(potential_country)
 
         return cls._unique_ordered(found)
 
@@ -1330,6 +1353,83 @@ class ProfileGateService:
                 values.append(f"{normalized_month} {year}")
 
         return cls._unique_ordered(values)
+
+    @classmethod
+    def _infer_country_from_university(cls, text: str) -> Optional[str]:
+        """Infer study country from university mentions (e.g., 'MIT' → 'United States')."""
+        lowered = text.lower()
+
+        # University patterns mapped to countries
+        university_country_map = {
+            # US Universities
+            "mit": "United States",
+            "massachusetts institute of technology": "United States",
+            "stanford": "United States",
+            "harvard": "United States",
+            "yale": "United States",
+            "princeton": "United States",
+            "columbia": "United States",
+            "berkeley": "United States",
+            "uc berkeley": "United States",
+            "ucla": "United States",
+            "caltech": "United States",
+            "carnegie mellon": "United States",
+            "cmu": "United States",
+            "nyu": "United States",
+            "upenn": "United States",
+            "penn": "United States",
+            "cornell": "United States",
+            "duke": "United States",
+            "northwestern": "United States",
+            "uchicago": "United States",
+            "johns hopkins": "United States",
+            "georgia tech": "United States",
+            # UK Universities
+            "oxford": "United Kingdom",
+            "cambridge": "United Kingdom",
+            "imperial": "United Kingdom",
+            "imperial college": "United Kingdom",
+            "ucl": "United Kingdom",
+            "lse": "United Kingdom",
+            "edinburgh": "United Kingdom",
+            "manchester": "United Kingdom",
+            "kings college": "United Kingdom",
+            "kcl": "United Kingdom",
+            # Singapore Universities
+            "nus": "Singapore",
+            "national university of singapore": "Singapore",
+            "ntu": "Singapore",
+            "nanyang": "Singapore",
+            "nanyang technological": "Singapore",
+            "smu": "Singapore",
+            "singapore management": "Singapore",
+            "sutd": "Singapore",
+            # Switzerland
+            "eth zurich": "Switzerland",
+            "eth": "Switzerland",
+            "epfl": "Switzerland",
+            # Canada
+            "toronto": "Canada",
+            "mcgill": "Canada",
+            # Australia
+            "melbourne": "Australia",
+            "sydney": "Australia",
+            "anu": "Australia",
+            # China
+            "tsinghua": "China",
+            "peking": "China",
+            # Japan
+            "tokyo": "Japan",
+            "kyoto": "Japan",
+            # South Korea
+            "seoul national": "South Korea",
+            "kaist": "South Korea",
+        }
+
+        for pattern, country in university_country_map.items():
+            if re.search(rf"\b{re.escape(pattern)}\b", lowered):
+                return country
+        return None
 
     @classmethod
     def _extract_funding_candidates(cls, text: str) -> list[str]:

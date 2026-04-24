@@ -2,7 +2,6 @@
 
 # pylint: disable=too-many-lines
 
-import asyncio
 import base64
 import binascii
 import hashlib
@@ -23,6 +22,7 @@ from app.clients.program_discovery_client import ProgramDiscoveryClient
 from app.clients.scholarship_discovery_client import ScholarshipDiscoveryClient
 from app.core.database import get_pool
 from app.core.logging import get_logger
+from app.models.applications import TrackedApplicationCreate
 from app.models.results import DiscoverRequest
 from app.repositories.agent_call_log_repo import AgentCallLogRepository
 from app.repositories.chat_repo import ChatRepository
@@ -32,6 +32,7 @@ from app.repositories.user_repo import UserRepository
 from app.repositories.workflow_run_repo import WorkflowRunRepository
 from app.services.agent_availability_service import AgentAvailabilityService
 from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS, detect_application_support_action
+from app.services.application_tracking_service import ApplicationTrackingService
 from app.services.eligibility_service import EligibilityEvaluationInput, EligibilityService
 from app.services.intent_registry_service import IntentRegistryService
 from app.services.profile_gate_service import ProfileGateService
@@ -86,6 +87,10 @@ def _lazy_application_support_client() -> ApplicationSupportClient:
     return ApplicationSupportClient()
 
 
+def _lazy_application_tracking_service() -> ApplicationTrackingService:
+    return ApplicationTrackingService()
+
+
 def _lazy_result_aggregation_service() -> ResultAggregationService:
     return ResultAggregationService()
 
@@ -122,6 +127,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         program_discovery_client: Optional[ProgramDiscoveryClient] = None,
         scholarship_discovery_client: Optional[ScholarshipDiscoveryClient] = None,
         application_support_client: Optional[ApplicationSupportClient] = None,
+        application_tracking_service: Optional[ApplicationTrackingService] = None,
         result_aggregation_service: Optional[ResultAggregationService] = None,
         eligibility_service: Optional[EligibilityService] = None,
     ) -> None:
@@ -137,6 +143,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         self._program_discovery_client = program_discovery_client
         self._scholarship_discovery_client = scholarship_discovery_client
         self._application_support_client = application_support_client
+        self._application_tracking_service = application_tracking_service
         self._result_aggregation_service = result_aggregation_service
 
     @classmethod
@@ -263,6 +270,12 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         if self._application_support_client is None:
             self._application_support_client = _lazy_application_support_client()
         return self._application_support_client
+
+    @property
+    def application_tracking_service(self) -> ApplicationTrackingService:
+        if self._application_tracking_service is None:
+            self._application_tracking_service = _lazy_application_tracking_service()
+        return self._application_tracking_service
 
     @property
     def result_aggregation_service(self) -> ResultAggregationService:
@@ -434,7 +447,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
 
         logger.info("chat_deleted", user_id=user_id, chat_id=chat_id)
 
-    async def send_message(
+    async def send_message(  # pylint: disable=too-many-locals
         self,
         user_id: str,
         chat_id: str,
@@ -497,6 +510,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             pending_intent_for_next_turn: str | None = None
             pending_eligibility_context_for_next_turn: dict[str, Any] | None = None
             pending_application_support_context_for_next_turn: dict[str, Any] | None = None
+            response_dict: dict[str, Any] = {}
 
             if detected_intent == "out_of_scope":
                 assistant_content = self._build_out_of_scope_response(intent_policy)
@@ -708,6 +722,14 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             )
             if isinstance(_pending_application_support_context, dict) and _pending_application_support_context:
                 assistant_metadata["pending_application_support_context"] = _pending_application_support_context
+            refresh_tabs = response_dict.get("refresh_tabs") if isinstance(response_dict, dict) else None
+            if isinstance(refresh_tabs, list) and refresh_tabs:
+                assistant_metadata["refresh_tabs"] = [str(tab) for tab in refresh_tabs if tab]
+            focus_application_id = (
+                response_dict.get("focus_application_id") if isinstance(response_dict, dict) else None
+            )
+            if isinstance(focus_application_id, str) and focus_application_id.strip():
+                assistant_metadata["focus_application_id"] = focus_application_id.strip()
 
             assistant_message = await self.message_repo.create(
                 message_id=assistant_message_id,
@@ -1098,6 +1120,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                         "answer": answer.strip(),
                         "agent_reasoning": result.get("agent_reasoning"),
                         "source": "program_discovery",
+                        "dashboard_items": self._build_program_dashboard_items_from_chat_result(result),
                     }
 
             logger.warning(
@@ -1114,6 +1137,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 ),
                 "agent_reasoning": None,
                 "source": "program_discovery",
+                "dashboard_items": [],
             }
 
         except AgentClientError as exc:
@@ -1145,6 +1169,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 ),
                 "agent_reasoning": None,
                 "source": "program_discovery",
+                "dashboard_items": [],
             }
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(
@@ -1157,111 +1182,233 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 "answer": ("I ran into an unexpected issue while searching for programs. " "Please try again shortly."),
                 "agent_reasoning": None,
                 "source": "program_discovery",
+                "dashboard_items": [],
             }
 
-    async def _handle_result_aggregation_discovery(
+    async def _persist_chat_dashboard_snapshot(
         self,
         *,
         user_id: str,
         chat_id: str,
-        content: str,
-        workflow_run_id: str,
         detected_intent: str,
-    ) -> str:
-        """Run the shared aggregation pipeline so chat and dashboard use the same results."""
-        started_at = time.perf_counter()
-        request = self._build_discover_request_from_chat(content)
-        try:
-            result = await self.result_aggregation_service.discover(
-                user_id=user_id,
-                request=request,
-                trace_id=workflow_run_id,
-            )
-            await self._record_program_discovery_call(
-                user_id=user_id,
-                chat_id=chat_id,
-                workflow_run_id=workflow_run_id,
-                target_service="orchestrator",
-                operation="result_aggregation_discover",
-                request_method="POST",
-                request_path="/api/v1/discover",
-                call_status="success",
-                request_payload=request.model_dump(),
-                response_payload=self._truncate_response_for_logging(result),
-                latency_ms=self._elapsed_ms(started_at),
-            )
-            dashboard = result.get("dashboard") if isinstance(result, dict) else None
-            if isinstance(dashboard, dict):
-                return self._format_aggregation_chat_response(
-                    dashboard=dashboard,
-                    detected_intent=detected_intent,
-                )
-            return "I ran discovery and saved the latest results to your dashboard."
-        except AgentClientError as exc:
-            await self._record_program_discovery_call(
-                user_id=user_id,
-                chat_id=chat_id,
-                workflow_run_id=workflow_run_id,
-                target_service="orchestrator",
-                operation="result_aggregation_discover",
-                request_method="POST",
-                request_path="/api/v1/discover",
-                call_status="failed",
-                http_status=exc.status_code,
-                error_code="agent_client_error",
-                error_message=str(exc),
-                request_payload=request.model_dump(),
-                latency_ms=self._elapsed_ms(started_at),
-            )
-            logger.error(
-                "result_aggregation_discovery_failed",
-                user_id=user_id,
-                chat_id=chat_id,
-                status_code=exc.status_code,
-                error=str(exc),
-            )
-            return (
-                "I tried to run discovery for your dashboard, but one of the discovery agents "
-                "encountered an issue. Please try again in a moment."
-            )
-
-    async def _save_discovery_to_dashboard_async(
-        self,
-        *,
-        user_id: str,
-        chat_id: str,
         content: str,
-        workflow_run_id: str,
-        detected_intent: str,
+        programs: Optional[list[dict[str, Any]]] = None,
+        scholarships: Optional[list[dict[str, Any]]] = None,
     ) -> None:
-        """Background task to save discovery results to dashboard.
-
-        Runs asynchronously without blocking the chat response.
-        This ensures users see the same results in both chat and dashboard.
-        """
         try:
-            await self._handle_result_aggregation_discovery(
+            await self.result_aggregation_service.persist_chat_dashboard_snapshot(
                 user_id=user_id,
                 chat_id=chat_id,
-                content=content,
-                workflow_run_id=workflow_run_id,
-                detected_intent=detected_intent,
+                source_intent=detected_intent,
+                source_message=content,
+                programs=programs,
+                scholarships=scholarships,
+                agents={
+                    "chat-sync": {
+                        "status": "success",
+                        "intent": detected_intent,
+                    }
+                },
             )
             logger.info(
-                "dashboard_save_completed",
+                "dashboard_chat_snapshot_persisted",
                 user_id=user_id,
                 chat_id=chat_id,
                 intent=detected_intent,
+                program_count=len(programs or []),
+                scholarship_count=len(scholarships or []),
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            # Don't let dashboard save failures affect chat response
             logger.warning(
-                "dashboard_save_failed_non_blocking",
+                "dashboard_chat_snapshot_persist_failed",
                 error=str(exc),
                 user_id=user_id,
                 chat_id=chat_id,
                 intent=detected_intent,
             )
+
+    @classmethod
+    def _build_program_dashboard_items_from_chat_result(cls, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+
+        direct_items = payload.get("programs")
+        if isinstance(direct_items, list) and direct_items and isinstance(direct_items[0], dict):
+            return [dict(item) for item in direct_items if isinstance(item, dict)]
+
+        reasoning = payload.get("agent_reasoning")
+        if not isinstance(reasoning, dict):
+            return []
+
+        entries = cls._select_program_entries_for_dashboard(
+            reasoning.get("ranking_breakdown"),
+            payload.get("programs_mentioned"),
+        )
+
+        items: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            program_name = cls._first_text(entry.get("program_name"), "Unnamed program")
+            institution_name = cls._first_text(entry.get("university"), "Unknown institution")
+            program_id = cls._first_text(entry.get("program_id"))
+            if not program_id:
+                program_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        (
+                            "chat-program:"
+                            f"{cls._normalize_match_text(program_name)}:"
+                            f"{cls._normalize_match_text(institution_name)}"
+                        ),
+                    )
+                )
+            item = {
+                "id": program_id,
+                "program_name": program_name,
+                "institution_name": institution_name,
+                "institution_country": cls._first_text(entry.get("country"), ""),
+                "ranking": {
+                    "rank": entry.get("rank"),
+                    "decision": entry.get("decision"),
+                    "match_scores": entry.get("match_scores"),
+                    "evidence": entry.get("evidence"),
+                },
+                "match": cls._build_chat_match_summary(
+                    entry.get("composite_score"),
+                    confidence_level=entry.get("decision"),
+                ),
+            }
+            items.append(item)
+        return items
+
+    @classmethod
+    def _select_program_entries_for_dashboard(
+        cls,
+        ranking_breakdown: Any,
+        programs_mentioned: Any,
+    ) -> list[dict[str, Any]]:
+        entries = [entry for entry in (ranking_breakdown or []) if isinstance(entry, dict)]
+        if not entries:
+            return []
+
+        mentions = [mention for mention in (programs_mentioned or []) if isinstance(mention, str) and mention.strip()]
+        if not mentions:
+            return entries
+
+        matched_entries: list[dict[str, Any]] = []
+        used_indexes: set[int] = set()
+
+        for mention in mentions:
+            for index, entry in enumerate(entries):
+                if index in used_indexes:
+                    continue
+                if cls._program_entry_matches_mention(entry, mention):
+                    matched_entries.append(entry)
+                    used_indexes.add(index)
+                    break
+
+        return matched_entries or entries
+
+    @classmethod
+    def _program_entry_matches_mention(cls, entry: dict[str, Any], mention: str) -> bool:
+        normalized_mention = cls._normalize_match_text(mention)
+        if not normalized_mention:
+            return False
+
+        program_name = cls._first_text(entry.get("program_name"))
+        institution_name = cls._first_text(entry.get("university"))
+        normalized_program = cls._normalize_match_text(program_name)
+        normalized_institution = cls._normalize_match_text(institution_name)
+
+        if normalized_program and normalized_program == normalized_mention:
+            return True
+
+        combined_label = cls._normalize_match_text(f"{program_name} {institution_name}".strip())
+        combined_with_at = cls._normalize_match_text(f"{program_name} at {institution_name}".strip())
+        for candidate in (combined_label, combined_with_at):
+            if candidate and (candidate == normalized_mention or candidate in normalized_mention):
+                return True
+
+        if normalized_program and normalized_program in normalized_mention:
+            if not normalized_institution:
+                return True
+            institution_tokens = normalized_institution.split()
+            return any(token and token in normalized_mention for token in institution_tokens)
+
+        return False
+
+    @classmethod
+    def _build_scholarship_dashboard_items_from_chat_result(cls, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+
+        items = payload.get("data")
+        if not isinstance(items, list):
+            return []
+
+        reasoning = payload.get("agent_reasoning")
+        breakdown_by_id: dict[str, dict[str, Any]] = {}
+        if isinstance(reasoning, dict):
+            for entry in reasoning.get("matching_breakdown") or []:
+                if not isinstance(entry, dict):
+                    continue
+                scholarship_id = entry.get("scholarship_id")
+                if scholarship_id is None:
+                    continue
+                breakdown_by_id[str(scholarship_id)] = entry
+
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            breakdown = breakdown_by_id.get(str(item.get("id")))
+            score_value = None
+            confidence_level = None
+            if isinstance(breakdown, dict):
+                score_value = breakdown.get("composite_score")
+                confidence_level = breakdown.get("decision")
+                normalized["ranking"] = {
+                    "rank": breakdown.get("rank"),
+                    "decision": breakdown.get("decision"),
+                    "match_scores": breakdown.get("match_scores"),
+                    "match_evidence": breakdown.get("match_evidence"),
+                    "eligibility_check": breakdown.get("eligibility_check"),
+                }
+            elif item.get("match_confidence") is not None:
+                score_value = item.get("match_confidence")
+
+            match_summary = cls._build_chat_match_summary(score_value, confidence_level=confidence_level)
+            if match_summary is not None:
+                normalized["match"] = match_summary
+            normalized_items.append(normalized)
+        return normalized_items
+
+    @classmethod
+    def _build_chat_match_summary(
+        cls,
+        score: Any,
+        *,
+        confidence_level: Any = None,
+    ) -> Optional[dict[str, Any]]:
+        normalized_score = cls._normalize_chat_match_score(score)
+        if normalized_score is None and confidence_level is None:
+            return None
+        return {
+            "match_score": normalized_score,
+            "confidence_level": str(confidence_level) if confidence_level is not None else None,
+        }
+
+    @staticmethod
+    def _normalize_chat_match_score(score: Any) -> Optional[float]:
+        try:
+            numeric = float(score)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= numeric <= 1:
+            return round(numeric * 100, 2)
+        return round(numeric, 2)
 
     @classmethod
     def _build_discover_request_from_chat(cls, content: str) -> DiscoverRequest:
@@ -1534,6 +1681,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 "answer": formatted_answer,
                 "agent_reasoning": agent_reasoning,
                 "source": "scholarship_discovery",
+                "dashboard_items": self._build_scholarship_dashboard_items_from_chat_result(result),
             }
 
         except AgentClientError as exc:
@@ -1569,6 +1717,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 ),
                 "agent_reasoning": None,
                 "source": "scholarship_discovery",
+                "dashboard_items": [],
             }
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.error(
@@ -1581,6 +1730,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 "answer": "I ran into an unexpected issue while searching for scholarships. Please try again shortly.",
                 "agent_reasoning": None,
                 "source": "scholarship_discovery",
+                "dashboard_items": [],
             }
 
     async def _handle_eligibility_check(
@@ -3242,10 +3392,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         Returns:
             Dict with 'answer' (str) and optional 'agent_reasoning' (dict).
         """
-        # HYBRID APPROACH: Use ORB-32's rich handlers for chat response,
-        # then save to dashboard asynchronously for consistent UX
         if detected_intent == "program_discovery":
-            # Get rich response with agent_reasoning from ORB-32's handler
             pda_result = await self._handle_program_discovery(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -3253,20 +3400,17 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 workflow_run_id=workflow_run_id,
                 gate=gate,
             )
-            # Also save to dashboard (background task - don't block response)
-            asyncio.create_task(
-                self._save_discovery_to_dashboard_async(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    content=content,
-                    workflow_run_id=workflow_run_id,
-                    detected_intent=detected_intent,
-                )
+            await self._persist_chat_dashboard_snapshot(
+                user_id=user_id,
+                chat_id=chat_id,
+                detected_intent=detected_intent,
+                content=content,
+                programs=pda_result.get("dashboard_items"),
             )
+            pda_result["refresh_tabs"] = ["programs", "scholarships"]
             return pda_result
 
         if detected_intent == "scholarship_search":
-            # Get rich response with agent_reasoning from ORB-32's handler
             sda_result = await self._handle_scholarship_search(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -3274,16 +3418,14 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 workflow_run_id=workflow_run_id,
                 gate=gate,
             )
-            # Also save to dashboard (background task - don't block response)
-            asyncio.create_task(
-                self._save_discovery_to_dashboard_async(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    content=content,
-                    workflow_run_id=workflow_run_id,
-                    detected_intent=detected_intent,
-                )
+            await self._persist_chat_dashboard_snapshot(
+                user_id=user_id,
+                chat_id=chat_id,
+                detected_intent=detected_intent,
+                content=content,
+                scholarships=sda_result.get("dashboard_items"),
             )
+            sda_result["refresh_tabs"] = ["programs", "scholarships"]
             return sda_result
 
         if detected_intent == "eligibility_check":
@@ -3298,15 +3440,20 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             )
 
         if target_agent == "application-support":
-            result, app_agent_reasoning = await self._build_application_support_response(
+            response = await self._build_application_support_response(
                 user_id=user_id,
                 chat_id=chat_id,
                 user_message=content,
                 detected_intent=detected_intent,
-                trace_id=workflow_run_id,
                 pending_application_support_context=pending_application_support_context,
             )
-            return {"answer": result, "agent_reasoning": app_agent_reasoning, "source": "application_support"}
+            return {
+                "answer": response["answer"],
+                "agent_reasoning": response.get("agent_reasoning"),
+                "source": "application_support",
+                "refresh_tabs": response.get("refresh_tabs") or [],
+                "focus_application_id": response.get("focus_application_id"),
+            }
         return {
             "answer": self._build_intent_ready_response(detected_intent, content, gate),
             "agent_reasoning": None,
@@ -4000,112 +4147,320 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         chat_id: str,
         user_message: str,
         detected_intent: str,
-        trace_id: str,
+        trace_id: Optional[str] = None,
         pending_application_support_context: Optional[dict[str, Any]] = None,
-    ) -> tuple[str, Optional[dict[str, Any]]]:
-        """Delegate application-planning requests to application-support."""
+    ) -> dict[str, Any]:
+        """Track the target application first, then run the requested support action."""
         effective_message = user_message
         action = self._detect_application_support_action(user_message)
-        target_program = self._extract_target_program_from_message(user_message)
+        target_label = self._extract_target_program_from_message(user_message)
+        entity_type = self._detect_application_target_entity_type(user_message)
 
         if isinstance(pending_application_support_context, dict) and not self._is_explicit_intent_request(
             user_message, detected_intent
         ):
             effective_message = str(pending_application_support_context.get("source_message") or user_message)
             action = str(pending_application_support_context.get("action") or action)
-            target_program = str(pending_application_support_context.get("target_program") or target_program or "")
+            target_label = str(pending_application_support_context.get("target_program") or target_label or "")
+            entity_type = (
+                str(pending_application_support_context.get("target_entity_type") or entity_type or "program").strip()
+                or "program"
+            )
+
+        if action in {"sop", "cover_letter", "checklist", "deadlines"} and not target_label:
+            return {
+                "answer": (
+                    "I can help with that application task, but I need the target program or scholarship first. "
+                    "Please send the exact name you want me to work on."
+                ),
+                "agent_reasoning": None,
+            }
 
         try:
-            if action == "sop":
-                if not target_program:
-                    return (
-                        "I can draft a Statement of Purpose, but I need the target university or program first. "
-                        "Please send the program name and any requirements you want me to reflect.",
-                        None,
-                    )
-                payload = {
-                    "user_id": user_id,
-                    "target_program": {"program_name": target_program},
-                    "user_preferences": {
-                        "source_message": effective_message,
-                        "intent": detected_intent,
-                        "follow_up_message": user_message,
-                    },
-                }
-                result = await self.application_support_client.generate_sop(
-                    user_id,
-                    payload,
-                    trace_id=trace_id,
-                    session_id=chat_id,
-                )
-                agent_reasoning = (
-                    result.get("data", {}).get("agent_reasoning")
-                    if isinstance(result, dict) and isinstance(result.get("data"), dict)
-                    else None
-                )
-                return self._format_application_support_response(action, result), agent_reasoning
-
-            if action == "cover_letter":
-                payload = {
-                    "user_id": user_id,
-                    "target_type": "program",
-                    "target_details": {
-                        "name": target_program or "target program",
-                        "source_message": effective_message,
-                    },
-                }
-                result = await self.application_support_client.generate_cover_letter(
-                    user_id,
-                    payload,
-                    trace_id=trace_id,
-                    session_id=chat_id,
-                )
-                agent_reasoning = (
-                    result.get("data", {}).get("agent_reasoning")
-                    if isinstance(result, dict) and isinstance(result.get("data"), dict)
-                    else None
-                )
-                return self._format_application_support_response(action, result), agent_reasoning
-
-            if action == "deadlines":
-                result = await self.application_support_client.list_deadlines(
-                    user_id,
-                    trace_id=trace_id,
-                    session_id=chat_id,
-                )
-                return self._format_application_support_response(action, result), None
-
-            payload = {
-                "user_id": user_id,
-                "program_requirements": effective_message,
-                "target_program": {"program_name": target_program} if target_program else {},
-            }
-            result = await self.application_support_client.create_checklist(
-                user_id,
-                payload,
-                trace_id=trace_id,
-                session_id=chat_id,
+            target = await self._resolve_application_tracking_target(
+                user_id=user_id,
+                user_message=effective_message,
+                detected_intent=detected_intent,
+                requested_entity_type=entity_type,
+                target_label=target_label,
             )
-            return self._format_application_support_response(action, result), None
-        except AgentClientError as exc:
+            if target is None:
+                return {
+                    "answer": (
+                        "I can help with that application task, but I couldn't resolve which program or scholarship "
+                        "you meant. Please send the exact name first."
+                    ),
+                    "agent_reasoning": None,
+                }
+
+            application = await self.application_tracking_service.start_application(
+                user_id=user_id,
+                body=TrackedApplicationCreate(**target),
+            )
+
+            response_text: Optional[str] = None
+            agent_reasoning: Optional[dict[str, Any]] = None
+
+            if action == "sop":
+                if application.get("entity_type") != "program":
+                    response_text = (
+                        "I started tracking this scholarship in Applications, but SOP drafting is only "
+                        "available for program applications right now."
+                    )
+                else:
+                    result = await self.application_tracking_service.generate_sop(
+                        user_id=user_id,
+                        application_id=application["id"],
+                    )
+                    output = result.get("output") if isinstance(result, dict) else None
+                    agent_reasoning = (
+                        output.get("data", {}).get("agent_reasoning")
+                        if isinstance(output, dict) and isinstance(output.get("data"), dict)
+                        else None
+                    )
+                    response_text = self._format_application_support_response("sop", output)
+            elif action == "cover_letter":
+                result = await self.application_tracking_service.generate_cover_letter(
+                    user_id=user_id,
+                    application_id=application["id"],
+                )
+                output = result.get("output") if isinstance(result, dict) else None
+                agent_reasoning = (
+                    output.get("data", {}).get("agent_reasoning")
+                    if isinstance(output, dict) and isinstance(output.get("data"), dict)
+                    else None
+                )
+                response_text = self._format_application_support_response("cover_letter", output)
+            elif action == "deadlines":
+                result = await self.application_tracking_service.sync_deadline(
+                    user_id=user_id,
+                    application_id=application["id"],
+                )
+                output = result.get("output") if isinstance(result, dict) else None
+                response_text = self._format_application_support_response("deadlines", output)
+            else:
+                checklist_output = application.get("checklist_output")
+                if isinstance(checklist_output, dict):
+                    response_text = self._format_application_support_response("checklist", checklist_output)
+                else:
+                    result = await self.application_tracking_service.create_checklist(
+                        user_id=user_id,
+                        application_id=application["id"],
+                    )
+                    output = result.get("output") if isinstance(result, dict) else None
+                    response_text = self._format_application_support_response("checklist", output)
+
+            return {
+                "answer": response_text or "I updated your Applications tab with the latest application task.",
+                "agent_reasoning": agent_reasoning,
+                "refresh_tabs": ["applications"],
+                "focus_application_id": application.get("id"),
+            }
+        except (AgentClientError, HTTPException) as exc:
+            status_code = exc.status_code if isinstance(exc, AgentClientError) else exc.status_code
             logger.warning(
                 "application_support_request_failed",
                 user_id=user_id,
                 chat_id=chat_id,
+                trace_id=trace_id,
                 action=action,
-                status_code=exc.status_code,
+                status_code=status_code,
                 error=str(exc),
             )
-            return self._application_support_unavailable_response(), None
+            return {
+                "answer": self._application_support_unavailable_response(),
+                "agent_reasoning": None,
+            }
         except (RuntimeError, ValueError, TypeError) as exc:
             logger.warning(
                 "application_support_request_unavailable",
                 user_id=user_id,
                 chat_id=chat_id,
+                trace_id=trace_id,
                 action=action,
                 error=str(exc),
             )
-            return self._application_support_unavailable_response(), None
+            return {
+                "answer": self._application_support_unavailable_response(),
+                "agent_reasoning": None,
+            }
+
+    async def _resolve_application_tracking_target(
+        self,
+        *,
+        user_id: str,
+        user_message: str,
+        detected_intent: str,
+        requested_entity_type: str,
+        target_label: str,
+    ) -> Optional[dict[str, Any]]:
+        clean_label = self._normalize_application_target_label(target_label or user_message)
+        if not clean_label:
+            return None
+
+        dashboard_target = await self._find_application_target_in_dashboard(
+            user_id=user_id,
+            requested_entity_type=requested_entity_type,
+            query=clean_label,
+        )
+        if dashboard_target is not None:
+            return dashboard_target
+
+        entity_type = "scholarship" if requested_entity_type == "scholarship" else "program"
+        synthetic_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{user_id}:{entity_type}:{self._normalize_match_text(clean_label)}",
+            )
+        )
+        title_key = "name" if entity_type == "scholarship" else "program_name"
+        return {
+            "entity_type": entity_type,
+            "entity_id": synthetic_id,
+            "title": clean_label,
+            "provider": None,
+            "match_score": None,
+            "deadline": None,
+            "source_data": {
+                title_key: clean_label,
+                "source_message": user_message,
+                "intent": detected_intent,
+            },
+        }
+
+    async def _find_application_target_in_dashboard(
+        self,
+        *,
+        user_id: str,
+        requested_entity_type: str,
+        query: str,
+    ) -> Optional[dict[str, Any]]:
+        dashboard_payload = await self.result_aggregation_service.get_dashboard(
+            user_id=user_id,
+            include_history=False,
+        )
+        dashboard = dashboard_payload.get("dashboard") if isinstance(dashboard_payload, dict) else None
+        if not isinstance(dashboard, dict):
+            return None
+
+        section_names = (
+            ["scholarships", "programs"] if requested_entity_type == "scholarship" else ["programs", "scholarships"]
+        )
+        best_match: Optional[dict[str, Any]] = None
+        best_score = 0
+        for section_name in section_names:
+            section = dashboard.get(section_name)
+            if not isinstance(section, dict) or not isinstance(section.get("items"), list):
+                continue
+            for item in section["items"]:
+                if not isinstance(item, dict):
+                    continue
+                score = self._score_application_dashboard_item(query=query, item=item)
+                if score <= best_score:
+                    continue
+                entity_type = "scholarship" if section_name == "scholarships" else "program"
+                title = self._application_target_title(item, entity_type)
+                if not title:
+                    continue
+                best_score = score
+                best_match = {
+                    "entity_type": entity_type,
+                    "entity_id": str(item.get("id") or ""),
+                    "title": title,
+                    "provider": self._application_target_provider(item, entity_type),
+                    "match_score": self._application_target_match_score(item),
+                    "deadline": self._application_target_deadline(item),
+                    "source_data": dict(item),
+                }
+
+        if best_match and best_match.get("entity_id"):
+            return best_match
+        return None
+
+    def _score_application_dashboard_item(self, *, query: str, item: dict[str, Any]) -> int:
+        normalized_query = self._normalize_match_text(query)
+        if not normalized_query:
+            return 0
+        candidates = [
+            self._application_target_title(item, "program"),
+            self._application_target_title(item, "scholarship"),
+            self._application_target_provider(item, "program"),
+            self._application_target_provider(item, "scholarship"),
+        ]
+        best_score = 0
+        for candidate in candidates:
+            normalized_candidate = self._normalize_match_text(candidate or "")
+            if not normalized_candidate:
+                continue
+            if normalized_candidate == normalized_query:
+                return 100
+            if normalized_query in normalized_candidate:
+                best_score = max(best_score, 80)
+            elif normalized_candidate in normalized_query:
+                best_score = max(best_score, 70)
+            elif all(token in normalized_candidate for token in normalized_query.split()):
+                best_score = max(best_score, 60)
+        return best_score
+
+    @staticmethod
+    def _application_target_title(item: dict[str, Any], entity_type: str) -> Optional[str]:
+        if entity_type == "scholarship":
+            return ChatService._first_text(item.get("name"), item.get("title"), "")
+        return ChatService._first_text(item.get("program_name"), item.get("name"), item.get("title"), "")
+
+    @staticmethod
+    def _application_target_provider(item: dict[str, Any], entity_type: str) -> Optional[str]:
+        if entity_type == "scholarship":
+            return ChatService._first_text(item.get("provider"), item.get("organization"), "")
+        return ChatService._first_text(item.get("institution_name"), item.get("university"), item.get("provider"), "")
+
+    @staticmethod
+    def _application_target_match_score(item: dict[str, Any]) -> Optional[float]:
+        match = item.get("match")
+        if not isinstance(match, dict):
+            return None
+        try:
+            return float(match.get("match_score"))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _application_target_deadline(item: dict[str, Any]) -> Optional[str]:
+        deadline = item.get("deadline")
+        if isinstance(deadline, str) and deadline.strip():
+            return deadline.strip()
+        return None
+
+    @staticmethod
+    def _detect_application_target_entity_type(user_message: str) -> str:
+        lowered = (user_message or "").lower()
+        if any(token in lowered for token in ("scholarship", "grant", "bursary", "fellowship", "award")):
+            return "scholarship"
+        return "program"
+
+    @classmethod
+    def _normalize_application_target_label(cls, value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", (value or "").strip())
+        if not cleaned:
+            return ""
+        prefixes = [
+            "program ",
+            "the program ",
+            "scholarship ",
+            "the scholarship ",
+            "application for ",
+            "apply to ",
+        ]
+        lowered = cleaned.lower()
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                return cleaned[len(prefix) :].strip()
+        return cleaned
+
+    @staticmethod
+    def _normalize_match_text(value: str) -> str:
+        lowered = (value or "").strip().lower()
+        return re.sub(r"[^a-z0-9]+", " ", lowered).strip()
 
     def _build_intent_ready_response(
         self,
@@ -4174,6 +4529,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             "intent": detected_intent,
             "action": self._detect_application_support_action(user_message),
             "target_program": self._extract_target_program_from_message(user_message),
+            "target_entity_type": self._detect_application_target_entity_type(user_message),
             "source_message": user_message,
         }
 

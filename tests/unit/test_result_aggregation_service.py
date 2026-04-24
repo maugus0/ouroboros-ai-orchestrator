@@ -284,3 +284,43 @@ async def test_get_dashboard_history_after_discover_uses_persisted_rows():
     assert dashboard["has_results"] is True
     assert dashboard["history"]
     assert len(dashboard["history"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_persist_chat_dashboard_snapshot_preserves_untouched_sections():
+    workflow_repo = _FakeWorkflowRunRepo()
+    aggregate_repo = _FakeAggregatedRepo()
+    service = ResultAggregationService(
+        workflow_run_repo=workflow_repo,
+        aggregated_result_repo=aggregate_repo,
+        agent_call_log_repo=_FakeAgentLogRepo(),
+        student_profile_client=_StudentClient(),
+        program_discovery_client=_ProgramClient(),
+        scholarship_discovery_client=_ScholarshipClient(),
+        eligibility_engine_client=_EligibilityClient(),
+    )
+
+    await service.discover(user_id="user-1", request=DiscoverRequest(limit=5))
+
+    payload = await service.persist_chat_dashboard_snapshot(
+        user_id="user-1",
+        chat_id="chat-1",
+        source_intent="program_discovery",
+        source_message="show me AI programs",
+        programs=[
+            {
+                "id": "chat-program-1",
+                "program_name": "MSc Artificial Intelligence",
+                "institution_name": "Imperial College London",
+                "match": {"match_score": 91.0},
+            }
+        ],
+        agents={"chat-sync": {"status": "success"}},
+    )
+
+    assert payload["status"] == "success"
+    assert payload["dashboard"]["programs"]["items"][0]["program_name"] == "MSc Artificial Intelligence"
+    assert payload["dashboard"]["scholarships"]["items"][0]["id"] == "scholarship-1"
+    assert payload["dashboard"]["matches"]["total"] == 2
+    assert workflow_repo.created[-1]["workflow_type"] == "chat_dashboard_sync"
+    assert workflow_repo.completed[-1]["workflow_state"] == "SUCCESS"

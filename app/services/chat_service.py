@@ -1618,8 +1618,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         )
         secondary_entity_type = "scholarship" if primary_entity_type == "program" else "program"
 
-        # Collect evidence from both discovery agents so eligibility checks are
-        # grounded in program + scholarship context before final evaluation.
+        # Resolve entity from the primary type first; fall back to secondary if unresolved.
         primary_entity_id, primary_entity_name = await self._resolve_entity_for_eligibility(
             content=content,
             entity_type=primary_entity_type,
@@ -1630,10 +1629,18 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             pending_eligibility_context=pending_eligibility_context,
         )
 
-        should_fallback_to_secondary = not (is_clarification_reply and context_entity_type is not None)
+        entity_type = primary_entity_type
+        entity_id = primary_entity_id
+        entity_name = primary_entity_name
+
+        # If primary resolution failed and we're not in a clarification flow with explicit entity type,
+        # attempt secondary entity type as fallback (e.g., user said "am I eligible" without specifying)
+        should_fallback_to_secondary = not entity_id and not (
+            is_clarification_reply and context_entity_type is not None
+        )
 
         if should_fallback_to_secondary:
-            _, _ = await self._resolve_entity_for_eligibility(
+            secondary_entity_id, secondary_entity_name = await self._resolve_entity_for_eligibility(
                 content=content,
                 entity_type=secondary_entity_type,
                 user_id=user_id,
@@ -1642,10 +1649,10 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 is_clarification_reply=is_clarification_reply,
                 pending_eligibility_context=pending_eligibility_context,
             )
-
-        entity_type = primary_entity_type
-        entity_id = primary_entity_id
-        entity_name = primary_entity_name
+            if secondary_entity_id:
+                entity_type = secondary_entity_type
+                entity_id = secondary_entity_id
+                entity_name = secondary_entity_name
 
         if not entity_id:
             if entity_type == "program" and is_clarification_reply and self._is_generic_program_title_hint(content):
@@ -1929,7 +1936,26 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 )
                 items = search_result.get("data") or []
                 if items and isinstance(items[0], dict):
-                    if is_clarification_reply or len(items) == 1:
+                    # For clarification replies, filter items by name match to avoid selecting
+                    # an unrelated scholarship when user provides a specific name
+                    if is_clarification_reply:
+                        content_lower = content.lower()
+                        matched = [
+                            item
+                            for item in items
+                            if isinstance(item, dict)
+                            and (
+                                content_lower in (item.get("name") or "").lower()
+                                or content_lower in (item.get("title") or "").lower()
+                            )
+                        ]
+                        if len(matched) == 1:
+                            return str(matched[0].get("id") or ""), matched[0].get("name") or matched[0].get("title")
+                        # If no exact match found but only one result, use it
+                        if not matched and len(items) == 1:
+                            item = items[0]
+                            return str(item.get("id") or ""), item.get("name") or item.get("title")
+                    elif len(items) == 1:
                         item = items[0]
                         return str(item.get("id") or ""), item.get("name") or item.get("title")
         except (AgentClientError, HTTPException) as exc:
@@ -1981,23 +2007,50 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         entity_type: str,
         existing_context: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
-        """Capture lightweight hints to resolve eligibility entity on the next user turn."""
-        if entity_type != "program":
-            return existing_context if isinstance(existing_context, dict) else None
+        """Capture lightweight hints to resolve eligibility entity on the next user turn.
 
-        institution_hint, title_hint = cls._extract_program_institution_and_title_hint(content)
-        if not institution_hint:
-            institution_hint = cls._extract_institution_hint_from_text(content)
-
+        Always persists entity_type so follow-up turns retain context for both programs
+        and scholarships. For programs, also extracts institution/title hints.
+        """
         merged: dict[str, Any] = {}
         if isinstance(existing_context, dict):
             merged.update(existing_context)
-        if institution_hint:
-            merged["institution_hint"] = institution_hint
-        if title_hint:
-            merged["program_title_hint"] = title_hint
-        merged["entity_type"] = "program"
+
+        # Always persist entity_type so scholarship flows retain context
+        merged["entity_type"] = entity_type
+
+        if entity_type == "program":
+            institution_hint, title_hint = cls._extract_program_institution_and_title_hint(content)
+            if not institution_hint:
+                institution_hint = cls._extract_institution_hint_from_text(content)
+            if institution_hint:
+                merged["institution_hint"] = institution_hint
+            if title_hint:
+                merged["program_title_hint"] = title_hint
+        elif entity_type == "scholarship":
+            # Extract scholarship name hint from content for better disambiguation
+            scholarship_hint = cls._extract_scholarship_name_hint(content)
+            if scholarship_hint:
+                merged["scholarship_name_hint"] = scholarship_hint
+
         return merged or None
+
+    @staticmethod
+    def _extract_scholarship_name_hint(content: str) -> Optional[str]:
+        """Extract likely scholarship name from content for disambiguation."""
+        text = re.sub(r"\s+", " ", (content or "").strip())
+        if not text:
+            return None
+        # Remove common eligibility intent scaffolding
+        cleaned = re.sub(
+            r"^(check|tell|find|show|assess|evaluate)?\s*(my\s*)?"
+            r"(eligibility|eligible|qualification|qualify)\s*(for|to)?\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"^[\-:\u2014\s]+", "", cleaned).strip()
+        return cleaned if cleaned else None
 
     @staticmethod
     def _normalize_program_entity_query(content: str) -> str:

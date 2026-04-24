@@ -24,6 +24,8 @@ from app.repositories.agent_call_log_repo import AgentCallLogRepository
 from app.repositories.aggregated_result_repo import AggregatedResultRepository
 from app.repositories.workflow_run_repo import WorkflowRunRepository
 
+# pylint: disable=too-many-lines
+
 logger = get_logger(__name__)
 
 
@@ -471,15 +473,20 @@ class ResultAggregationService:
         latest_program_output = latest.get("program_output") if isinstance(latest, dict) else None
         latest_scholarship_output = latest.get("scholarship_output") if isinstance(latest, dict) else None
 
-        program_items = self._clone_items(programs) if programs is not None else self._extract_dashboard_section_items(
-            latest_dashboard, "programs"
+        program_items = (
+            self._clone_items(programs)
+            if programs is not None
+            else self._extract_dashboard_section_items(latest_dashboard, "programs")
         )
         scholarship_items = (
             self._clone_items(scholarships)
             if scholarships is not None
             else self._extract_dashboard_section_items(latest_dashboard, "scholarships")
         )
-        match_items = self._build_match_items_from_sections(program_items=program_items, scholarship_items=scholarship_items)
+        match_items = self._build_match_items_from_sections(
+            program_items=program_items,
+            scholarship_items=scholarship_items,
+        )
 
         merged_agents = self._extract_dashboard_agents(latest_dashboard)
         merged_agents.update({key: dict(value) for key, value in (agents or {}).items() if isinstance(value, dict)})
@@ -517,9 +524,7 @@ class ResultAggregationService:
             current_step="COMPLETED",
             profile_output=latest_profile_output,
             program_output={"items": program_items} if programs is not None else latest_program_output,
-            scholarship_output={"items": scholarship_items}
-            if scholarships is not None
-            else latest_scholarship_output,
+            scholarship_output={"items": scholarship_items} if scholarships is not None else latest_scholarship_output,
             match_output={"results": match_items},
             application_output=latest_application_output,
             dashboard_view=dashboard,

@@ -447,7 +447,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
 
         logger.info("chat_deleted", user_id=user_id, chat_id=chat_id)
 
-    async def send_message(
+    async def send_message(  # pylint: disable=too-many-locals
         self,
         user_id: str,
         chat_id: str,
@@ -725,7 +725,9 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             refresh_tabs = response_dict.get("refresh_tabs") if isinstance(response_dict, dict) else None
             if isinstance(refresh_tabs, list) and refresh_tabs:
                 assistant_metadata["refresh_tabs"] = [str(tab) for tab in refresh_tabs if tab]
-            focus_application_id = response_dict.get("focus_application_id") if isinstance(response_dict, dict) else None
+            focus_application_id = (
+                response_dict.get("focus_application_id") if isinstance(response_dict, dict) else None
+            )
             if isinstance(focus_application_id, str) and focus_application_id.strip():
                 assistant_metadata["focus_application_id"] = focus_application_id.strip()
 
@@ -1254,7 +1256,11 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 program_id = str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
-                        f"chat-program:{cls._normalize_match_text(program_name)}:{cls._normalize_match_text(institution_name)}",
+                        (
+                            "chat-program:"
+                            f"{cls._normalize_match_text(program_name)}:"
+                            f"{cls._normalize_match_text(institution_name)}"
+                        ),
                     )
                 )
             item = {
@@ -3439,7 +3445,6 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 chat_id=chat_id,
                 user_message=content,
                 detected_intent=detected_intent,
-                trace_id=workflow_run_id,
                 pending_application_support_context=pending_application_support_context,
             )
             return {
@@ -4142,7 +4147,6 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         chat_id: str,
         user_message: str,
         detected_intent: str,
-        trace_id: str,
         pending_application_support_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Track the target application first, then run the requested support action."""
@@ -4157,9 +4161,10 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
             effective_message = str(pending_application_support_context.get("source_message") or user_message)
             action = str(pending_application_support_context.get("action") or action)
             target_label = str(pending_application_support_context.get("target_program") or target_label or "")
-            entity_type = str(
-                pending_application_support_context.get("target_entity_type") or entity_type or "program"
-            ).strip() or "program"
+            entity_type = (
+                str(pending_application_support_context.get("target_entity_type") or entity_type or "program").strip()
+                or "program"
+            )
 
         if action in {"sop", "cover_letter", "checklist", "deadlines"} and not target_label:
             return {
@@ -4327,12 +4332,17 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         requested_entity_type: str,
         query: str,
     ) -> Optional[dict[str, Any]]:
-        dashboard_payload = await self.result_aggregation_service.get_dashboard(user_id=user_id, include_history=False)
+        dashboard_payload = await self.result_aggregation_service.get_dashboard(
+            user_id=user_id,
+            include_history=False,
+        )
         dashboard = dashboard_payload.get("dashboard") if isinstance(dashboard_payload, dict) else None
         if not isinstance(dashboard, dict):
             return None
 
-        section_names = ["scholarships", "programs"] if requested_entity_type == "scholarship" else ["programs", "scholarships"]
+        section_names = (
+            ["scholarships", "programs"] if requested_entity_type == "scholarship" else ["programs", "scholarships"]
+        )
         best_match: Optional[dict[str, Any]] = None
         best_score = 0
         for section_name in section_names:

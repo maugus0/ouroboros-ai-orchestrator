@@ -4,7 +4,6 @@
 # Tests call private helpers on the service under test (protected-access).
 # pylint: disable=redefined-outer-name,protected-access,too-many-lines
 
-import asyncio
 import base64
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -155,9 +154,7 @@ def mock_application_tracking_service():
         }
     )
     service.generate_sop = AsyncMock(return_value={"output": {"data": {"content": "Generated SOP content"}}})
-    service.generate_cover_letter = AsyncMock(
-        return_value={"output": {"data": {"content": "Generated cover letter"}}}
-    )
+    service.generate_cover_letter = AsyncMock(return_value={"output": {"data": {"content": "Generated cover letter"}}})
     service.create_checklist = AsyncMock(
         return_value={
             "output": {

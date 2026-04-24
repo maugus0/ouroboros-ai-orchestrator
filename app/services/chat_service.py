@@ -4147,6 +4147,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
         chat_id: str,
         user_message: str,
         detected_intent: str,
+        trace_id: Optional[str] = None,
         pending_application_support_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Track the target application first, then run the requested support action."""
@@ -4261,6 +4262,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 "application_support_request_failed",
                 user_id=user_id,
                 chat_id=chat_id,
+                trace_id=trace_id,
                 action=action,
                 status_code=status_code,
                 error=str(exc),
@@ -4274,6 +4276,7 @@ class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-
                 "application_support_request_unavailable",
                 user_id=user_id,
                 chat_id=chat_id,
+                trace_id=trace_id,
                 action=action,
                 error=str(exc),
             )

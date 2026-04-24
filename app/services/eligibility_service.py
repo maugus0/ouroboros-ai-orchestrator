@@ -57,17 +57,27 @@ class EligibilityService:
         request: EligibilityEvaluationInput,
         trace_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Evaluate a user against a program or scholarship."""
-        user_profile = await self._hydrate_user_profile(
-            user_id=request.user_id,
-            trace_id=trace_id,
-        )
-        entity_data = await self._hydrate_entity_data(
-            user_id=request.user_id,
-            entity_type=request.entity_type,
-            entity_id=request.entity_id,
-            trace_id=trace_id,
-        )
+        """Evaluate a user against a program or scholarship.
+
+        If user_profile or entity_data is provided in the request, those values are used.
+        Otherwise, the service hydrates them from downstream services (student-profile, PDA/SDA).
+        """
+        # Only hydrate when not already provided
+        user_profile = request.user_profile
+        if user_profile is None:
+            user_profile = await self._hydrate_user_profile(
+                user_id=request.user_id,
+                trace_id=trace_id,
+            )
+
+        entity_data = request.entity_data
+        if entity_data is None:
+            entity_data = await self._hydrate_entity_data(
+                user_id=request.user_id,
+                entity_type=request.entity_type,
+                entity_id=request.entity_id,
+                trace_id=trace_id,
+            )
 
         payload = {
             "user_id": request.user_id,
@@ -281,7 +291,14 @@ class EligibilityService:
             items = value
         else:
             items = [value]
-        normalized = [str(item).strip() for item in items if str(item).strip()]
+        # Filter out None and non-scalar types before stringifying to avoid literal "None"
+        normalized: list[str] = []
+        for item in items:
+            if item is None or isinstance(item, (dict, list, set, tuple)):
+                continue
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
         return normalized
 
     @staticmethod

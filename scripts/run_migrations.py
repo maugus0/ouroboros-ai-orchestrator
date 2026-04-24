@@ -83,7 +83,7 @@ def drain_cursor_results(cursor) -> None:
     try:
         if getattr(cursor, "with_rows", False):
             cursor.fetchall()
-    except mysql.connector.Error:
+    except (mysql.connector.Error, AttributeError):
         pass
 
     try:

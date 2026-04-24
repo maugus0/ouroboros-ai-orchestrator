@@ -4,7 +4,6 @@
 # Tests call private helpers on the service under test (protected-access).
 # pylint: disable=redefined-outer-name,protected-access,too-many-lines
 
-import asyncio
 import base64
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -2256,12 +2255,20 @@ async def test_handle_eligibility_check_no_entity_returns_clarification(
     chat_service,
     mock_eligibility_service,
     mock_program_discovery_client,
+    mock_scholarship_discovery_client,
 ):
-    """When no UUID and PDA returns multiple results, handler asks a follow-up."""
+    """When no UUID and PDA returns multiple results (and SDA fallback also fails), handler asks a follow-up."""
     mock_program_discovery_client.search_programs.return_value = {
         "data": [
             {"id": "prog-1", "name": "MSc CS"},
             {"id": "prog-2", "name": "MSc AI"},
+        ]
+    }
+    # Ensure fallback to scholarship also returns multiple (no auto-select)
+    mock_scholarship_discovery_client.search_scholarships.return_value = {
+        "data": [
+            {"id": "sch-1", "name": "Scholarship A"},
+            {"id": "sch-2", "name": "Scholarship B"},
         ]
     }
 
@@ -2306,34 +2313,70 @@ async def test_handle_eligibility_check_pda_resolves_single_entity(
 
 
 @pytest.mark.asyncio
-async def test_handle_eligibility_check_consults_program_and_scholarship_agents(
+async def test_handle_eligibility_check_uses_fallback_to_secondary_entity(
     chat_service,
     mock_eligibility_service,
     mock_program_discovery_client,
     mock_scholarship_discovery_client,
 ):
-    """Eligibility orchestration should consult both PDA and SDA before final evaluation."""
+    """When primary entity (program) fails to resolve, fallback to secondary entity (scholarship)."""
     mock_program_discovery_client.search_programs.return_value = {
-        "data": [{"id": "prog-only-1", "name": "MSc Computing"}]
+        "data": [
+            {"id": "prog-1", "name": "MSc A"},
+            {"id": "prog-2", "name": "MSc B"},
+        ]
     }
     mock_scholarship_discovery_client.search_scholarships.return_value = {
-        "data": [
-            {"id": "sch-1", "name": "Scholarship A"},
-            {"id": "sch-2", "name": "Scholarship B"},
-        ]
+        "data": [{"id": "sch-only-1", "name": "Global Masters Scholarship"}]
+    }
+
+    # Content without "scholarship" keyword so program is detected as primary
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Am I eligible for a masters degree?",
+        workflow_run_id="wf-fallback-secondary",
+        gate={"allowed": True},
+    )
+
+    mock_program_discovery_client.search_programs.assert_awaited()
+    # SDA is called as fallback because program resolution failed (multiple results)
+    mock_scholarship_discovery_client.search_scholarships.assert_awaited()
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    # The entity_type should be "scholarship" since fallback was used
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_type == "scholarship"
+    assert call_args.args[0].entity_id == "sch-only-1"
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_skips_secondary_when_primary_resolves(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """When primary entity (program) resolves, secondary (scholarship) is not called."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [{"id": "prog-only-1", "name": "MSc Computing"}]
     }
 
     result = await chat_service._handle_eligibility_check(
         user_id="user-456",
         chat_id="chat-123",
         content="Am I eligible for MSc Computing at NUS?",
-        workflow_run_id="wf-consult-both",
+        workflow_run_id="wf-primary-resolves",
         gate={"allowed": True},
     )
 
     mock_program_discovery_client.search_programs.assert_awaited()
-    mock_scholarship_discovery_client.search_scholarships.assert_awaited()
+    # SDA should NOT be called because program resolved successfully
+    mock_scholarship_discovery_client.search_scholarships.assert_not_awaited()
     mock_eligibility_service.evaluate.assert_awaited_once()
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_type == "program"
+    assert call_args.args[0].entity_id == "prog-only-1"
     assert result["source"] == "eligibility_engine"
 
 
@@ -2396,12 +2439,20 @@ async def test_handle_eligibility_check_not_clarification_reply_multiple_returns
     chat_service,
     mock_eligibility_service,
     mock_program_discovery_client,
+    mock_scholarship_discovery_client,
 ):
-    """When is_clarification_reply=False and PDA returns multiple, still ask for clarification."""
+    """When is_clarification_reply=False and both PDA/SDA return multiple, still ask for clarification."""
     mock_program_discovery_client.search_programs.return_value = {
         "data": [
             {"id": "prog-a", "name": "MSc Computing"},
             {"id": "prog-b", "name": "MSc CS"},
+        ]
+    }
+    # Ensure fallback also returns multiple (no auto-select)
+    mock_scholarship_discovery_client.search_scholarships.return_value = {
+        "data": [
+            {"id": "sch-a", "name": "Scholarship A"},
+            {"id": "sch-b", "name": "Scholarship B"},
         ]
     }
 
@@ -2424,9 +2475,12 @@ async def test_handle_eligibility_check_clarification_keeps_institution_hint_con
     chat_service,
     mock_eligibility_service,
     mock_program_discovery_client,
+    mock_scholarship_discovery_client,
 ):
     """When unresolved, clarification response should carry institution hint for next turn."""
     mock_program_discovery_client.search_programs.return_value = {"data": []}
+    # Ensure fallback also fails to resolve
+    mock_scholarship_discovery_client.search_scholarships.return_value = {"data": []}
 
     result = await chat_service._handle_eligibility_check(
         user_id="user-456",
@@ -2948,28 +3002,23 @@ async def test_send_message_gate_blocked_scholarship_sets_pending_intent_metadat
     assert assistant_kwargs["metadata"]["pending_intent"] == "scholarship_search"
 
 
-def test_handle_eligibility_check_no_entity_includes_pending_intent(
-    anyio_backend,
-):
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_no_entity_includes_pending_intent():
     """Clarification response dict must carry pending_intent=eligibility_check."""
-    _ = anyio_backend
+    service = MagicMock()
+    service._detect_entity_type_for_eligibility = MagicMock(return_value="program")
+    service._resolve_entity_for_eligibility = AsyncMock(return_value=(None, None))
+    service._eligibility_clarification_message = MagicMock(return_value="Please provide a program name.")
+    service._build_pending_eligibility_context = MagicMock(return_value={"entity_type": "program"})
 
-    async def _run():
-        service = MagicMock()
-        service._detect_entity_type_for_eligibility = MagicMock(return_value="program")
-        service._resolve_entity_for_eligibility = AsyncMock(return_value=(None, None))
-        service._eligibility_clarification_message = MagicMock(return_value="Please provide a program name.")
+    result = await ChatService._handle_eligibility_check(
+        service,
+        user_id="u1",
+        chat_id="c1",
+        content="am I eligible",
+        workflow_run_id="wf-1",
+        gate={"allowed": True},
+    )
 
-        result = await ChatService._handle_eligibility_check(
-            service,
-            user_id="u1",
-            chat_id="c1",
-            content="am I eligible",
-            workflow_run_id="wf-1",
-            gate={"allowed": True},
-        )
-        return result
-
-    result = asyncio.get_event_loop().run_until_complete(_run())
     assert result.get("pending_intent") == "eligibility_check"
     assert result["source"] == "orchestrator"

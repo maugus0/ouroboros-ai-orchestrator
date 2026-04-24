@@ -26,7 +26,7 @@ SET @add_cover_letter_output = (
     SELECT IF(
         COUNT(*) = 0,
         'ALTER TABLE tracked_applications ADD COLUMN cover_letter_output JSON NULL AFTER sop_output',
-        'SELECT 1'
+        'DO 0'
     )
     FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()

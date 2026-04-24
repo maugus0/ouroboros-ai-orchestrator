@@ -463,6 +463,11 @@ class IntentRegistryService:
         if any(token in lowered for token in ("scholarship", "funding", "grant", "financial aid")):
             return "scholarship_search"
 
+        # Eligibility keywords take priority over program discovery — even when the message
+        # names a program or university ("check my eligibility for NUS Master of Computing").
+        if any(token in lowered for token in ("eligible", "eligibility", "qualify", "qualified")):
+            return "eligibility_check"
+
         if self._is_program_discovery_query(lowered):
             if self._has_application_keywords(lowered) and self._has_university_mention(lowered):
                 return "apply_to_named_school"
@@ -470,11 +475,6 @@ class IntentRegistryService:
 
         if any(token in lowered for token in ("profile", "my gpa", "my degree", "my background", "update my")):
             return "profile_completion"
-
-        if any(token in lowered for token in ("eligible", "eligibility", "qualify", "qualified")):
-            if self._is_program_discovery_query(lowered):
-                return "program_discovery"
-            return "eligibility_check"
 
         return "out_of_scope"
 

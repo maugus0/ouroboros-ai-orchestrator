@@ -78,6 +78,22 @@ def strip_sql_comments(sql_content: str) -> str:
     return "\n".join(lines)
 
 
+def drain_cursor_results(cursor) -> None:
+    """Consume all pending result sets to keep mysql connector state clean."""
+    try:
+        if getattr(cursor, "with_rows", False):
+            cursor.fetchall()
+    except mysql.connector.Error:
+        pass
+
+    try:
+        while cursor.nextset():
+            if getattr(cursor, "with_rows", False):
+                cursor.fetchall()
+    except (mysql.connector.Error, AttributeError):
+        pass
+
+
 def run_migration_file(connection, sql_file: Path) -> None:
     """Run every statement in a single migration file (idempotent)."""
     cursor = connection.cursor()
@@ -89,6 +105,7 @@ def run_migration_file(connection, sql_file: Path) -> None:
         for statement in statements:
             try:
                 cursor.execute(statement)
+                drain_cursor_results(cursor)
                 connection.commit()
             except mysql.connector.Error as exc:
                 error_msg = str(exc).lower()

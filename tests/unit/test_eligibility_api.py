@@ -31,7 +31,19 @@ def teardown_function():
 def test_evaluate_endpoint_injects_authenticated_user_and_trace_header(monkeypatch):
     mock_service = MagicMock()
     mock_service.evaluate = AsyncMock(
-        return_value={"success": True, "message": "OK", "data": {"match_result": {"id": "match-1"}}}
+        return_value={
+            "success": True,
+            "message": "OK",
+            "data": {
+                "match_result": {"id": "match-1"},
+                "agent_reasoning": {
+                    "approach": "Compute weighted eligibility scores.",
+                    "decision_factors": ["Top contributor: relevance"],
+                    "next_field": None,
+                    "confidence": 0.9,
+                },
+            },
+        }
     )
     monkeypatch.setattr(eligibility_api, "eligibility_service", mock_service)
     app.dependency_overrides[get_current_user_id] = _override_current_user_id
@@ -50,6 +62,7 @@ def test_evaluate_endpoint_injects_authenticated_user_and_trace_header(monkeypat
 
     assert response.status_code == 200
     assert response.json()["data"]["match_result"]["id"] == "match-1"
+    assert response.json()["data"]["agent_reasoning"]["confidence"] == 0.9
     mock_service.evaluate.assert_awaited_once_with(
         EligibilityEvaluationInput(
             user_id="user-123",
@@ -60,6 +73,42 @@ def test_evaluate_endpoint_injects_authenticated_user_and_trace_header(monkeypat
             include_attribution=True,
         ),
         trace_id="trace-123",
+    )
+
+
+def test_evaluate_endpoint_allows_orchestrator_hydration(monkeypatch):
+    mock_service = MagicMock()
+    mock_service.evaluate = AsyncMock(
+        return_value={
+            "success": True,
+            "message": "OK",
+            "data": {"match_result": {"id": "match-2"}},
+        }
+    )
+    monkeypatch.setattr(eligibility_api, "eligibility_service", mock_service)
+    app.dependency_overrides[get_current_user_id] = _override_current_user_id
+
+    response = client.post(
+        "/api/v1/eligibility/evaluate",
+        headers={"X-Trace-ID": "trace-hydrate"},
+        json={
+            "entity_type": "scholarship",
+            "entity_id": "scholarship-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["match_result"]["id"] == "match-2"
+    mock_service.evaluate.assert_awaited_once_with(
+        EligibilityEvaluationInput(
+            user_id="user-123",
+            entity_type="scholarship",
+            entity_id="scholarship-1",
+            user_profile=None,
+            entity_data=None,
+            include_attribution=True,
+        ),
+        trace_id="trace-hydrate",
     )
 
 

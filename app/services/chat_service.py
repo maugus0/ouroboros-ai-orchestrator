@@ -32,6 +32,7 @@ from app.repositories.user_repo import UserRepository
 from app.repositories.workflow_run_repo import WorkflowRunRepository
 from app.services.agent_availability_service import AgentAvailabilityService
 from app.services.application_support_keywords import APPLICATION_SUPPORT_KEYWORDS, detect_application_support_action
+from app.services.eligibility_service import EligibilityEvaluationInput, EligibilityService
 from app.services.intent_registry_service import IntentRegistryService
 from app.services.profile_gate_service import ProfileGateService
 from app.services.result_aggregation_service import ResultAggregationService
@@ -89,6 +90,10 @@ def _lazy_result_aggregation_service() -> ResultAggregationService:
     return ResultAggregationService()
 
 
+def _lazy_eligibility_service() -> EligibilityService:
+    return EligibilityService()
+
+
 def _as_string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item is not None]
@@ -97,7 +102,7 @@ def _as_string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
-class ChatService:  # pylint: disable=too-many-public-methods
+class ChatService:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
     """Orchestrates chat session operations."""
 
     _RESPONSE_CACHE_TTL_SECONDS = 90
@@ -118,7 +123,9 @@ class ChatService:  # pylint: disable=too-many-public-methods
         scholarship_discovery_client: Optional[ScholarshipDiscoveryClient] = None,
         application_support_client: Optional[ApplicationSupportClient] = None,
         result_aggregation_service: Optional[ResultAggregationService] = None,
+        eligibility_service: Optional[EligibilityService] = None,
     ) -> None:
+        self._eligibility_service = eligibility_service
         self._chat_repo = chat_repo
         self._message_repo = message_repo
         self._project_repo = project_repo
@@ -262,6 +269,12 @@ class ChatService:  # pylint: disable=too-many-public-methods
         if self._result_aggregation_service is None:
             self._result_aggregation_service = _lazy_result_aggregation_service()
         return self._result_aggregation_service
+
+    @property
+    def eligibility_service(self) -> EligibilityService:
+        if self._eligibility_service is None:
+            self._eligibility_service = _lazy_eligibility_service()
+        return self._eligibility_service
 
     # -- Public API --
 
@@ -440,6 +453,7 @@ class ChatService:  # pylint: disable=too-many-public-methods
             context={"retry_of_log_id": retry_of_log_id} if retry_of_log_id else None,
         )
 
+        latest_assistant_message = await self._get_latest_assistant_message(chat_id)
         user_message_id = str(uuid.uuid4())
         try:
             user_message = await self.message_repo.create(
@@ -452,11 +466,27 @@ class ChatService:  # pylint: disable=too-many-public-methods
             logger.info("message_sent", user_id=user_id, chat_id=chat_id, message_id=user_message_id, role="user")
 
             detected_intent = self.intent_registry_service.detect_intent(content)
-            latest_assistant_message = await self._get_latest_assistant_message(chat_id)
             detected_intent = self._maybe_override_intent_for_clarification_reply(
                 detected_intent,
                 content,
                 latest_assistant_message,
+            )
+            is_eligibility_clarification_reply = (
+                isinstance(latest_assistant_message, dict)
+                and isinstance(latest_assistant_message.get("metadata"), dict)
+                and latest_assistant_message["metadata"].get("pending_intent") == "eligibility_check"
+            )
+            pending_eligibility_context = (
+                latest_assistant_message.get("metadata", {}).get("pending_eligibility_context")
+                if isinstance(latest_assistant_message, dict)
+                and isinstance(latest_assistant_message.get("metadata"), dict)
+                else None
+            )
+            pending_application_support_context = (
+                latest_assistant_message.get("metadata", {}).get("pending_application_support_context")
+                if isinstance(latest_assistant_message, dict)
+                and isinstance(latest_assistant_message.get("metadata"), dict)
+                else None
             )
             intent_policy = self.intent_registry_service.get_policy(detected_intent)
             target_agent = intent_policy.get("agent") if isinstance(intent_policy, dict) else None
@@ -464,6 +494,9 @@ class ChatService:  # pylint: disable=too-many-public-methods
             active_profile_slot: dict[str, Any] | None = None
             collected_from_chat: dict[str, Any] | None = None
             agent_reasoning_from_response: dict[str, Any] | None = None
+            pending_intent_for_next_turn: str | None = None
+            pending_eligibility_context_for_next_turn: dict[str, Any] | None = None
+            pending_application_support_context_for_next_turn: dict[str, Any] | None = None
 
             if detected_intent == "out_of_scope":
                 assistant_content = self._build_out_of_scope_response(intent_policy)
@@ -508,8 +541,18 @@ class ChatService:  # pylint: disable=too-many-public-methods
                     gate = cached_response["gate"]
                     target_agent = cached_response.get("target_agent", target_agent)
                     agent_reasoning_from_response = cached_response.get("agent_reasoning_from_response")
+                    pending_intent_for_next_turn = cached_response.get("pending_intent_for_next_turn")
+                    pending_eligibility_context_for_next_turn = cached_response.get(
+                        "pending_eligibility_context_for_next_turn"
+                    )
+                    pending_application_support_context_for_next_turn = cached_response.get(
+                        "pending_application_support_context_for_next_turn"
+                    )
                 else:
                     agent_reasoning_from_response = None
+                    pending_intent_for_next_turn = None
+                    pending_eligibility_context_for_next_turn = None
+                    pending_application_support_context_for_next_turn = None
                     clarification_question: Optional[str] = None
                     clarification_field: Optional[str] = None
                     active_profile_slot = None
@@ -539,9 +582,39 @@ class ChatService:  # pylint: disable=too-many-public-methods
                         chat_id=chat_id,
                         content=content,
                         workflow_run_id=workflow_run_id,
+                        is_eligibility_clarification_reply=is_eligibility_clarification_reply,
+                        pending_eligibility_context=pending_eligibility_context,
+                        pending_application_support_context=pending_application_support_context,
                     )
                     assistant_content = response_dict.get("answer", "")
                     agent_reasoning_from_response = response_dict.get("agent_reasoning")
+                    pending_intent_for_next_turn = response_dict.get("pending_intent") or None
+                    pending_eligibility_context_for_next_turn = response_dict.get("pending_eligibility_context")
+                    pending_application_support_context_for_next_turn = response_dict.get(
+                        "pending_application_support_context"
+                    )
+
+                    # Keep domain-intent continuity across profile-gate clarification turns.
+                    # Example: "what about scholarship for me" -> blocked for missing profile
+                    # field -> user answers "Singapore". The follow-up should continue
+                    # scholarship_search rather than being recast as profile_completion.
+                    if (
+                        not pending_intent_for_next_turn
+                        and gate.get("allowed") is False
+                        and str(gate.get("reason") or "") == "profile_incomplete_for_intent"
+                        and detected_intent not in {"profile_completion", "out_of_scope"}
+                    ):
+                        pending_intent_for_next_turn = detected_intent
+                    if (
+                        pending_intent_for_next_turn in {"application_planning", "apply_to_named_school"}
+                        and not pending_application_support_context_for_next_turn
+                    ):
+                        pending_application_support_context_for_next_turn = (
+                            self._build_pending_application_support_context(
+                                content,
+                                detected_intent,
+                            )
+                        )
 
                     active_profile_slot = self._build_active_profile_slot(
                         clarification_field=clarification_field,
@@ -560,6 +633,11 @@ class ChatService:  # pylint: disable=too-many-public-methods
                             "gate": gate,
                             "target_agent": target_agent,
                             "active_profile_slot": active_profile_slot,
+                            "pending_intent_for_next_turn": pending_intent_for_next_turn,
+                            "pending_eligibility_context_for_next_turn": pending_eligibility_context_for_next_turn,
+                            "pending_application_support_context_for_next_turn": (
+                                pending_application_support_context_for_next_turn
+                            ),
                         },
                     )
 
@@ -609,6 +687,27 @@ class ChatService:  # pylint: disable=too-many-public-methods
             )
             if agent_reasoning is not None:
                 assistant_metadata["agent_reasoning"] = agent_reasoning
+            _pending = (
+                (cached_response or {}).get("pending_intent_for_next_turn")
+                if cached_response is not None
+                else pending_intent_for_next_turn
+            )
+            if _pending:
+                assistant_metadata["pending_intent"] = _pending
+            _pending_eligibility_context = (
+                (cached_response or {}).get("pending_eligibility_context_for_next_turn")
+                if cached_response is not None
+                else pending_eligibility_context_for_next_turn
+            )
+            if isinstance(_pending_eligibility_context, dict) and _pending_eligibility_context:
+                assistant_metadata["pending_eligibility_context"] = _pending_eligibility_context
+            _pending_application_support_context = (
+                (cached_response or {}).get("pending_application_support_context_for_next_turn")
+                if cached_response is not None
+                else pending_application_support_context_for_next_turn
+            )
+            if isinstance(_pending_application_support_context, dict) and _pending_application_support_context:
+                assistant_metadata["pending_application_support_context"] = _pending_application_support_context
 
             assistant_message = await self.message_repo.create(
                 message_id=assistant_message_id,
@@ -715,9 +814,10 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 retry_of_log_id=retry_of_log_id,
             )
             first_clarification_field = self._extract_clarification_field(clarifications_before)
-            # Only route through ReAct clarification if the field matches the gate's requirements
-            missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
-            if first_clarification_field and first_clarification_field in missing_fields:
+            # Bind replies to the active clarification-queue field even when it is
+            # outside intent-required gate fields (for example optional profile
+            # fields like publications asked by the profile agent).
+            if first_clarification_field:
                 clarification_submission = await self.profile_gate_service.submit_profile_clarification_answers(
                     user_id=user_id,
                     profile_id=str(profile_id),
@@ -1482,6 +1582,624 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 "agent_reasoning": None,
                 "source": "scholarship_discovery",
             }
+
+    async def _handle_eligibility_check(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        workflow_run_id: str,
+        gate: dict[str, Any],
+        is_clarification_reply: bool = False,
+        pending_eligibility_context: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Call the Eligibility Engine to evaluate the user against a program or scholarship.
+
+        Tries to resolve entity_type and entity_id from the user message.
+        If resolution fails, returns a clarifying follow-up question instead of calling the engine.
+
+        Returns:
+            Dict with 'answer' (str) and optional 'agent_reasoning' (dict).
+        """
+        started_at = time.perf_counter()
+        _ = gate
+
+        context_entity_type = None
+        if isinstance(pending_eligibility_context, dict):
+            candidate = str(pending_eligibility_context.get("entity_type") or "").strip().lower()
+            if candidate in {"program", "scholarship"}:
+                context_entity_type = candidate
+
+        primary_entity_type = (
+            context_entity_type
+            if is_clarification_reply and context_entity_type
+            else self._detect_entity_type_for_eligibility(content)
+        )
+        secondary_entity_type = "scholarship" if primary_entity_type == "program" else "program"
+
+        # Collect evidence from both discovery agents so eligibility checks are
+        # grounded in program + scholarship context before final evaluation.
+        primary_entity_id, primary_entity_name = await self._resolve_entity_for_eligibility(
+            content=content,
+            entity_type=primary_entity_type,
+            user_id=user_id,
+            chat_id=chat_id,
+            workflow_run_id=workflow_run_id,
+            is_clarification_reply=is_clarification_reply,
+            pending_eligibility_context=pending_eligibility_context,
+        )
+
+        should_fallback_to_secondary = not (is_clarification_reply and context_entity_type is not None)
+
+        if should_fallback_to_secondary:
+            _, _ = await self._resolve_entity_for_eligibility(
+                content=content,
+                entity_type=secondary_entity_type,
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                is_clarification_reply=is_clarification_reply,
+                pending_eligibility_context=pending_eligibility_context,
+            )
+
+        entity_type = primary_entity_type
+        entity_id = primary_entity_id
+        entity_name = primary_entity_name
+
+        if not entity_id:
+            if entity_type == "program" and is_clarification_reply and self._is_generic_program_title_hint(content):
+                clarification_prompt = (
+                    "Thanks, but that title is still too broad. "
+                    "Please include the university and full program name "
+                    '(for example: "NUS Master of Science in Computer Science"), '
+                    "or paste the program ID directly."
+                )
+            elif is_clarification_reply:
+                clarification_prompt = self._eligibility_unresolved_after_clarification_message(primary_entity_type)
+            else:
+                clarification_prompt = self._eligibility_clarification_message(primary_entity_type)
+            return {
+                "answer": clarification_prompt,
+                "agent_reasoning": None,
+                "source": "orchestrator",
+                "pending_intent": "eligibility_check",
+                "pending_eligibility_context": self._build_pending_eligibility_context(
+                    content=content,
+                    entity_type=primary_entity_type,
+                    existing_context=pending_eligibility_context,
+                ),
+            }
+
+        try:
+            result = await self.eligibility_service.evaluate(
+                EligibilityEvaluationInput(
+                    user_id=user_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    include_attribution=True,
+                ),
+                trace_id=workflow_run_id,
+            )
+
+            await self._record_eligibility_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="eligibility_check",
+                request_method="POST",
+                request_path="/matching/evaluate",
+                call_status="success",
+                request_payload={
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "entity_name": entity_name,
+                },
+                response_payload=self._truncate_response_for_logging(result),
+                latency_ms=self._elapsed_ms(started_at),
+            )
+
+            result_payload = result.get("data") if isinstance(result.get("data"), dict) else result
+            answer = self._format_eligibility_response(
+                result=result_payload,
+                entity_type=entity_type,
+                entity_name=entity_name,
+            )
+            return {
+                "answer": answer,
+                "agent_reasoning": result_payload.get("agent_reasoning"),
+                "source": "eligibility_engine",
+            }
+
+        except HTTPException as exc:
+            await self._record_eligibility_call(
+                user_id=user_id,
+                chat_id=chat_id,
+                workflow_run_id=workflow_run_id,
+                operation="eligibility_check",
+                request_method="POST",
+                request_path="/matching/evaluate",
+                call_status="failed",
+                http_status=exc.status_code,
+                error_code="http_exception",
+                error_message=str(exc.detail),
+                request_payload={"entity_type": entity_type, "entity_id": entity_id},
+                latency_ms=self._elapsed_ms(started_at),
+            )
+            logger.error(
+                "eligibility_check_http_error",
+                user_id=user_id,
+                chat_id=chat_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                status_code=exc.status_code,
+                error=str(exc.detail),
+            )
+            if exc.status_code in (
+                status.HTTP_424_FAILED_DEPENDENCY,
+                status.HTTP_502_BAD_GATEWAY,
+            ):
+                detail = str(exc.detail or "").strip()
+                lowered_detail = detail.lower()
+
+                if "student profile" in lowered_detail:
+                    missing_fields: list[str] = []
+                    try:
+                        readiness = await self.profile_gate_service.evaluate_gate(
+                            user_id,
+                            intent="eligibility_check",
+                            chat_id=chat_id,
+                            workflow_run_id=workflow_run_id,
+                        )
+                        missing_fields = _as_string_list(
+                            readiness.get("missing_required_fields") or readiness.get("missing_fields") or []
+                        )
+                    except (HTTPException, AgentClientError, aiomysql.Error, RuntimeError, ValueError, TypeError):
+                        missing_fields = []
+
+                    if missing_fields:
+                        labels = [self._format_profile_field_label(field) for field in missing_fields if field]
+                        missing_text = self._join_humanized_labels(labels)
+                        return {
+                            "answer": (
+                                "I couldn't check your eligibility yet because your profile is incomplete. "
+                                f"Please share your {missing_text}, then try again."
+                            ),
+                            "agent_reasoning": None,
+                            "source": "eligibility_engine",
+                        }
+
+                    return {
+                        "answer": (
+                            "I couldn't check your eligibility yet because your student profile isn't ready. "
+                            "Please complete your profile details and try again."
+                        ),
+                        "agent_reasoning": None,
+                        "source": "eligibility_engine",
+                    }
+
+                if "program details" in lowered_detail or "scholarship details" in lowered_detail:
+                    return {
+                        "answer": (
+                            "I couldn't fetch the latest details for that program or scholarship just now. "
+                            "Please try again in a moment, or provide the exact name/ID to retry."
+                        ),
+                        "agent_reasoning": None,
+                        "source": "eligibility_engine",
+                    }
+
+                return {
+                    "answer": (
+                        "I wasn't able to check your eligibility right now — "
+                        "a required dependency couldn't be fetched. "
+                        "Please try again in a moment."
+                    ),
+                    "agent_reasoning": None,
+                    "source": "eligibility_engine",
+                }
+            return {
+                "answer": (
+                    "I tried to check your eligibility but the eligibility service encountered an issue. "
+                    "Please try again in a moment."
+                ),
+                "agent_reasoning": None,
+                "source": "eligibility_engine",
+            }
+
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error(
+                "eligibility_check_unexpected_error",
+                user_id=user_id,
+                chat_id=chat_id,
+                error=str(exc),
+            )
+            return {
+                "answer": "I ran into an unexpected issue while checking your eligibility. Please try again shortly.",
+                "agent_reasoning": None,
+                "source": "eligibility_engine",
+            }
+
+    @staticmethod
+    def _detect_entity_type_for_eligibility(content: str) -> str:
+        """Return 'scholarship' or 'program' based on message keywords."""
+        lowered = content.lower()
+        scholarship_keywords = {"scholarship", "grant", "bursary", "fellowship", "award"}
+        if any(kw in lowered for kw in scholarship_keywords):
+            return "scholarship"
+        return "program"
+
+    async def _resolve_entity_for_eligibility(  # pylint: disable=too-many-nested-blocks
+        self,
+        *,
+        content: str,
+        entity_type: str,
+        user_id: str,
+        chat_id: str,
+        workflow_run_id: str,
+        is_clarification_reply: bool = False,
+        pending_eligibility_context: Optional[dict[str, Any]] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Extract or resolve entity_id from the user message.
+
+        Returns (entity_id, entity_name). entity_id is None when unresolvable.
+        Strategy:
+          1. If message contains a bare UUID, use it.
+          2. Otherwise query PDA/SDA for a name-based match.
+          3. When is_clarification_reply is True, pick the best (first) result even if
+             multiple are returned.
+          4. When is_clarification_reply is False, only auto-select if unambiguous (exactly 1).
+        """
+        uuid_re = re.compile(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            re.IGNORECASE,
+        )
+        uuid_match = uuid_re.search(content)
+        if uuid_match:
+            return uuid_match.group(0), None
+
+        if entity_type == "program" and is_clarification_reply and self._is_generic_program_title_hint(content):
+            return None, None
+
+        try:
+            if entity_type == "program":
+                program_queries = self._build_program_entity_queries(content)
+                for query in program_queries:
+                    search_result = await self.program_discovery_client.search_programs(
+                        query=query,
+                        page_size=5,
+                        user_id=user_id,
+                        trace_id=workflow_run_id,
+                        session_id=chat_id,
+                    )
+                    items = (
+                        search_result.get("data") or search_result.get("programs") or search_result.get("items") or []
+                    )
+                    if items and isinstance(items[0], dict):
+                        if is_clarification_reply or len(items) == 1:
+                            item = items[0]
+                            return str(item.get("id") or ""), item.get("name") or item.get("program_name")
+
+                # Fallback: if user includes institution in free text (e.g. "NUS Master of Science"),
+                # first resolve institution, then search programs scoped to that institution.
+                institution_hint, title_hint = self._extract_program_institution_and_title_hint(content)
+                if not institution_hint and isinstance(pending_eligibility_context, dict):
+                    institution_hint = str(pending_eligibility_context.get("institution_hint") or "").strip() or None
+                    if not title_hint:
+                        title_hint = str(pending_eligibility_context.get("program_title_hint") or "").strip() or None
+                if institution_hint:
+                    inst_result = await self.program_discovery_client.search_institutions(
+                        query=institution_hint,
+                        page_size=3,
+                        user_id=user_id,
+                        trace_id=workflow_run_id,
+                        session_id=chat_id,
+                    )
+                    institutions = (
+                        inst_result.get("data") or inst_result.get("institutions") or inst_result.get("items") or []
+                    )
+                    if institutions and isinstance(institutions[0], dict):
+                        institution_id = str(institutions[0].get("id") or "")
+                        if institution_id:
+                            scoped_seed = title_hint or self._normalize_program_entity_query(content)
+                            scoped_queries = self._build_program_entity_queries(scoped_seed)
+                            for scoped_query in scoped_queries:
+                                scoped_result = await self.program_discovery_client.search_programs(
+                                    query=scoped_query,
+                                    institution_id=institution_id,
+                                    page_size=5,
+                                    user_id=user_id,
+                                    trace_id=workflow_run_id,
+                                    session_id=chat_id,
+                                )
+                                scoped_items = (
+                                    scoped_result.get("data")
+                                    or scoped_result.get("programs")
+                                    or scoped_result.get("items")
+                                    or []
+                                )
+                                if scoped_items and isinstance(scoped_items[0], dict):
+                                    if is_clarification_reply or len(scoped_items) == 1:
+                                        item = scoped_items[0]
+                                        return str(item.get("id") or ""), item.get("name") or item.get("program_name")
+            else:
+                search_result = await self.scholarship_discovery_client.search_scholarships(
+                    user_id=user_id,
+                    trace_id=workflow_run_id,
+                    session_id=chat_id,
+                )
+                items = search_result.get("data") or []
+                if items and isinstance(items[0], dict):
+                    if is_clarification_reply or len(items) == 1:
+                        item = items[0]
+                        return str(item.get("id") or ""), item.get("name") or item.get("title")
+        except (AgentClientError, HTTPException) as exc:
+            logger.warning(
+                "eligibility_entity_resolution_failed",
+                entity_type=entity_type,
+                user_id=user_id,
+                error=str(exc),
+            )
+
+        return None, None
+
+    @staticmethod
+    def _is_generic_program_title_hint(content: str) -> bool:
+        """Return True when the reply is too generic to safely pick a single program."""
+        generic_titles = {
+            "master",
+            "masters",
+            "master of science",
+            "msc",
+            "m.sc",
+            "ms",
+            "bachelor",
+            "bachelors",
+            "bachelor of science",
+            "phd",
+            "doctorate",
+        }
+
+        normalized = re.sub(r"\s+", " ", (content or "").strip().lower())
+        if not normalized:
+            return True
+        if normalized in generic_titles:
+            return True
+
+        institution_hint, title_hint = ChatService._extract_program_institution_and_title_hint(content)
+        if institution_hint and title_hint:
+            normalized_title = re.sub(r"\s+", " ", title_hint.strip().lower())
+            if normalized_title in generic_titles:
+                return True
+
+        return False
+
+    @classmethod
+    def _build_pending_eligibility_context(
+        cls,
+        *,
+        content: str,
+        entity_type: str,
+        existing_context: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Capture lightweight hints to resolve eligibility entity on the next user turn."""
+        if entity_type != "program":
+            return existing_context if isinstance(existing_context, dict) else None
+
+        institution_hint, title_hint = cls._extract_program_institution_and_title_hint(content)
+        if not institution_hint:
+            institution_hint = cls._extract_institution_hint_from_text(content)
+
+        merged: dict[str, Any] = {}
+        if isinstance(existing_context, dict):
+            merged.update(existing_context)
+        if institution_hint:
+            merged["institution_hint"] = institution_hint
+        if title_hint:
+            merged["program_title_hint"] = title_hint
+        merged["entity_type"] = "program"
+        return merged or None
+
+    @staticmethod
+    def _normalize_program_entity_query(content: str) -> str:
+        """Strip intent scaffolding so PDA search gets a cleaner program title query."""
+        cleaned = re.sub(r"\s+", " ", (content or "").strip())
+        cleaned = re.sub(
+            (
+                r"^(check|tell|find|show|assess|evaluate)?\s*(my\s*)?"
+                r"(eligibility|eligible|qualification|qualify)\s*(for|to)?\s*"
+            ),
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"^[\-:\u2014\s]+", "", cleaned).strip()
+        return cleaned or content
+
+    @staticmethod
+    def _extract_institution_hint_from_text(content: str) -> Optional[str]:
+        """Extract likely institution acronym from free text (e.g., 'for MIT' → 'MIT')."""
+        text = re.sub(r"\s+", " ", (content or "").strip())
+        if not text:
+            return None
+        acronyms = re.findall(r"\b[A-Z]{2,10}\b", text)
+        if acronyms:
+            return acronyms[-1]
+        return None
+
+    @classmethod
+    def _build_program_entity_queries(cls, content: str) -> list[str]:
+        """Build a small query set to improve PDA recall for free-form program names."""
+        primary = cls._normalize_program_entity_query(content)
+        queries = [primary]
+        if primary.lower() != (content or "").strip().lower():
+            queries.append((content or "").strip())
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query in queries:
+            normalized_key = re.sub(r"\s+", " ", (query or "").strip().lower())
+            if not normalized_key or normalized_key in seen:
+                continue
+            seen.add(normalized_key)
+            deduped.append(query)
+        return deduped
+
+    @staticmethod
+    def _extract_program_institution_and_title_hint(content: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract lightweight institution/title hints from text like 'NUS Master of Science'."""
+        normalized = re.sub(r"\s+", " ", (content or "").strip())
+        if not normalized:
+            return None, None
+
+        # Common abbreviation-first pattern: "NUS Master of Science"
+        m = re.match(r"^([A-Za-z]{2,10})\s*(?:[-:|]\s*)?(.+)$", normalized)
+        if m:
+            org = m.group(1)
+            rest = re.sub(r"^[\-:|\s]+", "", m.group(2)).strip()
+            degree_like = re.match(
+                r"^(mscs|msc|m\.sc|ms|phd|mba|llm|meng|mfin|mpp|mph|bsc|bs|ba)\b",
+                rest,
+                flags=re.IGNORECASE,
+            )
+            if org.isupper() and (len(rest.split()) >= 2 or degree_like):
+                return org, rest
+
+        # Phrase pattern: "<institution> <master|msc|phd|bachelor ...>"
+        m2 = re.match(
+            r"^(.+?)\s+(master|masters|master's|m\.sc|msc|ms|phd|doctorate|bachelor|b\.sc|bs|ba)\b(.*)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if m2:
+            institution = m2.group(1).strip()
+            degree_head = m2.group(2).strip()
+            degree_tail = (m2.group(3) or "").strip()
+            title = f"{degree_head} {degree_tail}".strip()
+            return institution, title
+
+        return None, None
+
+    @staticmethod
+    def _format_eligibility_response(
+        *,
+        result: dict[str, Any],
+        entity_type: str,
+        entity_name: Optional[str],
+    ) -> str:
+        """Format the eligibility engine response into a human-readable answer."""
+        match_result = result.get("match_result") or {}
+        raw_score = match_result.get("match_score")
+        try:
+            score = float(raw_score) if raw_score is not None else None
+        except (TypeError, ValueError):
+            score = None
+        confidence = str(match_result.get("confidence_level") or "").lower()
+        breakdown = match_result.get("score_breakdown") or {}
+
+        entity_label = entity_name or entity_type
+
+        if score is None:
+            return (
+                f"I ran the eligibility check for {entity_label}, "
+                "but wasn't able to produce a score. Please try again."
+            )
+
+        if score >= 70:
+            verdict = "You appear to be a strong match"
+            qualifier = "high" if confidence == "high" else "good"
+        elif score >= 40:
+            verdict = "You may partially qualify"
+            qualifier = "moderate"
+        else:
+            verdict = "You appear to be below the typical threshold"
+            qualifier = "low"
+
+        lines: list[str] = [
+            f"**Eligibility Result for {entity_label}**",
+            "",
+            f"{verdict} \u2014 score: **{score}/100** ({qualifier} confidence).",
+        ]
+
+        attribution = result.get("attribution_report") or {}
+        narrative = attribution.get("narrative") or attribution.get("summary")
+        if narrative and isinstance(narrative, str):
+            lines += ["", narrative.strip()]
+
+        if breakdown:
+            significant = {k: v for k, v in breakdown.items() if isinstance(v, (int, float)) and v > 0}
+            if significant:
+                top = sorted(significant.items(), key=lambda x: x[1], reverse=True)[:3]
+                breakdown_text = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in top)
+                lines += ["", f"Top scoring factors: {breakdown_text}."]
+
+        lines += ["", "Would you like to review the full breakdown or explore other opportunities?"]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _eligibility_clarification_message(entity_type: str) -> str:
+        """Return a follow-up question when the target entity cannot be resolved."""
+        entity_label = "scholarship" if entity_type == "scholarship" else "program"
+        return (
+            f"I'd like to check your eligibility for that {entity_label}, "
+            "but I need a bit more detail. "
+            f"Could you share the name or ID of the specific {entity_label} you'd like to evaluate? "
+            f'For example: "Check my eligibility for NUS Master of Computing" '
+            "or paste the program ID directly."
+        )
+
+    @staticmethod
+    def _eligibility_unresolved_after_clarification_message(entity_type: str) -> str:
+        """Return a follow-up when clarification reply is specific but no exact entity match was found."""
+        entity_label = "scholarship" if entity_type == "scholarship" else "program"
+        return (
+            f"Thanks, I still couldn't find an exact {entity_label} match in our catalog. "
+            f"Please share the exact official {entity_label} name or paste the {entity_label} ID directly. "
+            "If you have a program URL, you can share that too."
+        )
+
+    async def _record_eligibility_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        *,
+        user_id: str,
+        chat_id: Optional[str],
+        workflow_run_id: Optional[str],
+        operation: str,
+        request_method: Optional[str],
+        request_path: Optional[str],
+        call_status: str,
+        http_status: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+        request_payload: Optional[dict[str, Any]] = None,
+        response_payload: Optional[dict[str, Any]] = None,
+        latency_ms: Optional[int] = None,
+    ) -> None:
+        """Log an eligibility-engine agent call for audit trail."""
+        repo = self.agent_call_log_repo
+        if repo is None:
+            return
+        try:
+            await repo.create_log(
+                log_id=str(uuid.uuid4()),
+                workflow_run_id=workflow_run_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                target_service="eligibility-engine",
+                operation=operation,
+                request_method=request_method,
+                request_path=request_path,
+                attempt_number=1,
+                status=call_status,
+                http_status=http_status,
+                error_code=error_code,
+                error_message=error_message,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                latency_ms=latency_ms,
+                retry_of_log_id=None,
+            )
+        except (aiomysql.Error, RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning("eligibility_call_log_write_failed", operation=operation, error=str(exc))
 
     async def _extract_program_context_for_scholarships(
         self,
@@ -2375,6 +3093,9 @@ class ChatService:  # pylint: disable=too-many-public-methods
         chat_id: str,
         content: str,
         workflow_run_id: str,
+        is_eligibility_clarification_reply: bool = False,
+        pending_eligibility_context: Optional[dict[str, Any]] = None,
+        pending_application_support_context: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Generate assistant content based on profile gate status and intent.
 
@@ -2397,6 +3118,9 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 content=content,
                 workflow_run_id=workflow_run_id,
                 gate=gate,
+                is_eligibility_clarification_reply=is_eligibility_clarification_reply,
+                pending_eligibility_context=pending_eligibility_context,
+                pending_application_support_context=pending_application_support_context,
             )
             return response, gate
 
@@ -2406,7 +3130,7 @@ class ChatService:  # pylint: disable=too-many-public-methods
         was_already_reminded = await self._has_recent_profile_gate_reminder(chat_id)
         missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
 
-        if no_fields_extracted and is_domain_query and was_already_reminded:
+        if no_fields_extracted and is_domain_query and was_already_reminded and detected_intent != "eligibility_check":
             logger.info(
                 "profile_gate_bypass_after_reminder",
                 user_id=user_id,
@@ -2423,6 +3147,8 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 content=content,
                 workflow_run_id=workflow_run_id,
                 gate=updated_gate,
+                is_eligibility_clarification_reply=is_eligibility_clarification_reply,
+                pending_eligibility_context=pending_eligibility_context,
             )
             return response, updated_gate
 
@@ -2454,6 +3180,9 @@ class ChatService:  # pylint: disable=too-many-public-methods
         content: str,
         workflow_run_id: str,
         gate: dict[str, Any],
+        is_eligibility_clarification_reply: bool = False,
+        pending_eligibility_context: Optional[dict[str, Any]] = None,
+        pending_application_support_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Generate response for allowed intent - either agent call or static response.
 
@@ -2504,15 +3233,27 @@ class ChatService:  # pylint: disable=too-many-public-methods
             )
             return sda_result
 
+        if detected_intent == "eligibility_check":
+            return await self._handle_eligibility_check(
+                user_id=user_id,
+                chat_id=chat_id,
+                content=content,
+                workflow_run_id=workflow_run_id,
+                gate=gate,
+                is_clarification_reply=is_eligibility_clarification_reply,
+                pending_eligibility_context=pending_eligibility_context,
+            )
+
         if target_agent == "application-support":
-            result = await self._build_application_support_response(
+            result, app_agent_reasoning = await self._build_application_support_response(
                 user_id=user_id,
                 chat_id=chat_id,
                 user_message=content,
                 detected_intent=detected_intent,
                 trace_id=workflow_run_id,
+                pending_application_support_context=pending_application_support_context,
             )
-            return {"answer": result, "agent_reasoning": None, "source": "application_support"}
+            return {"answer": result, "agent_reasoning": app_agent_reasoning, "source": "application_support"}
         return {
             "answer": self._build_intent_ready_response(detected_intent, content, gate),
             "agent_reasoning": None,
@@ -2545,11 +3286,14 @@ class ChatService:  # pylint: disable=too-many-public-methods
         content: str,
         latest_assistant_message: Optional[dict[str, Any]],
     ) -> str:
-        """Keep short clarification replies in profile-completion flow.
+        """Keep short clarification replies in the correct intent flow.
 
-        When the latest assistant message came from profile gating (not out-of-scope
-        or unavailable-agent), ambiguous short replies like "yes" should continue
-        the profile_completion path instead of boundary routing.
+        Handles two cases:
+        1. Profile-gate blocking: ambiguous short replies (e.g. "yes", "Computer Science")
+           should continue the profile_completion path.
+        2. Eligibility clarification pending: after the assistant asks for a program/scholarship
+           name or ID, the user's reply should continue as eligibility_check even when it
+           contains no explicit eligibility keywords (e.g. "NUS Master of Computing").
         """
         if not isinstance(latest_assistant_message, dict):
             return detected_intent
@@ -2557,6 +3301,17 @@ class ChatService:  # pylint: disable=too-many-public-methods
         metadata = latest_assistant_message.get("metadata")
         if not isinstance(metadata, dict):
             return detected_intent
+
+        pending_intent = str(metadata.get("pending_intent") or "").strip()
+        if pending_intent and pending_intent != detected_intent:
+            if pending_intent == "eligibility_check":
+                return "eligibility_check"
+            # For short slot answers that classifier marks as profile_completion,
+            # continue the previously blocked domain intent.
+            if detected_intent == "profile_completion" and not ChatService._is_explicit_intent_request(
+                content, detected_intent
+            ):
+                return pending_intent
 
         profile_gate = metadata.get("profile_gate")
         if not isinstance(profile_gate, dict):
@@ -2664,8 +3419,17 @@ class ChatService:  # pylint: disable=too-many-public-methods
     def _build_gate_decision(gate: dict[str, Any]) -> dict[str, Any]:
         missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
         allowed = bool(gate.get("allowed"))
-        gate_status = "COMPLETE" if allowed else "INCOMPLETE"
         reason = str(gate.get("reason") or "")
+        if reason == "bypass_after_reminder":
+            gate_status = "BYPASSED"
+        elif allowed:
+            gate_status = "COMPLETE"
+        elif reason == "intent_agent_unavailable":
+            gate_status = "UNAVAILABLE"
+        elif reason == "intent_out_of_scope":
+            gate_status = "OUT_OF_SCOPE"
+        else:
+            gate_status = "INCOMPLETE"
         human_reason = {
             "profile_complete_for_intent": "Profile is complete for this intent.",
             "profile_incomplete_for_intent": "Profile is missing required fields for this intent.",
@@ -2742,7 +3506,28 @@ class ChatService:  # pylint: disable=too-many-public-methods
         if from_student_profile:
             return dict(collected_from_chat["agent_reasoning"])
 
-        # Priority 3: Profile gate denial reasoning
+        # Priority 3: Explicit non-profile gate blocks
+        reason = str(gate.get("reason") or "")
+        if reason == "intent_agent_unavailable":
+            target_agent = str(gate.get("target_agent") or "the required service")
+            return {
+                "approach": "Pause domain routing until the mapped agent is available.",
+                "decision_factors": [
+                    f"Mapped agent '{target_agent}' is currently unavailable.",
+                    "Profile data was not the blocker for this turn.",
+                ],
+                "next_field": None,
+                "confidence": 0.92,
+            }
+        if reason == "intent_out_of_scope":
+            return {
+                "approach": "Apply orchestrator scope boundary handling.",
+                "decision_factors": ["Request is outside supported education-planning scope."],
+                "next_field": None,
+                "confidence": 0.95,
+            }
+
+        # Priority 4: Profile gate denial reasoning
         if gate.get("allowed") is False:
             missing_fields = _as_string_list(gate.get("missing_required_fields") or gate.get("missing_fields") or [])
             next_field = missing_fields[0] if missing_fields else None
@@ -3163,22 +3948,36 @@ class ChatService:  # pylint: disable=too-many-public-methods
         user_message: str,
         detected_intent: str,
         trace_id: str,
-    ) -> str:
+        pending_application_support_context: Optional[dict[str, Any]] = None,
+    ) -> tuple[str, Optional[dict[str, Any]]]:
         """Delegate application-planning requests to application-support."""
+        effective_message = user_message
         action = self._detect_application_support_action(user_message)
         target_program = self._extract_target_program_from_message(user_message)
+
+        if isinstance(pending_application_support_context, dict) and not self._is_explicit_intent_request(
+            user_message, detected_intent
+        ):
+            effective_message = str(pending_application_support_context.get("source_message") or user_message)
+            action = str(pending_application_support_context.get("action") or action)
+            target_program = str(pending_application_support_context.get("target_program") or target_program or "")
 
         try:
             if action == "sop":
                 if not target_program:
                     return (
                         "I can draft a Statement of Purpose, but I need the target university or program first. "
-                        "Please send the program name and any requirements you want me to reflect."
+                        "Please send the program name and any requirements you want me to reflect.",
+                        None,
                     )
                 payload = {
                     "user_id": user_id,
                     "target_program": {"program_name": target_program},
-                    "user_preferences": {"source_message": user_message, "intent": detected_intent},
+                    "user_preferences": {
+                        "source_message": effective_message,
+                        "intent": detected_intent,
+                        "follow_up_message": user_message,
+                    },
                 }
                 result = await self.application_support_client.generate_sop(
                     user_id,
@@ -3186,7 +3985,12 @@ class ChatService:  # pylint: disable=too-many-public-methods
                     trace_id=trace_id,
                     session_id=chat_id,
                 )
-                return self._format_application_support_response(action, result)
+                agent_reasoning = (
+                    result.get("data", {}).get("agent_reasoning")
+                    if isinstance(result, dict) and isinstance(result.get("data"), dict)
+                    else None
+                )
+                return self._format_application_support_response(action, result), agent_reasoning
 
             if action == "cover_letter":
                 payload = {
@@ -3194,7 +3998,7 @@ class ChatService:  # pylint: disable=too-many-public-methods
                     "target_type": "program",
                     "target_details": {
                         "name": target_program or "target program",
-                        "source_message": user_message,
+                        "source_message": effective_message,
                     },
                 }
                 result = await self.application_support_client.generate_cover_letter(
@@ -3203,7 +4007,12 @@ class ChatService:  # pylint: disable=too-many-public-methods
                     trace_id=trace_id,
                     session_id=chat_id,
                 )
-                return self._format_application_support_response(action, result)
+                agent_reasoning = (
+                    result.get("data", {}).get("agent_reasoning")
+                    if isinstance(result, dict) and isinstance(result.get("data"), dict)
+                    else None
+                )
+                return self._format_application_support_response(action, result), agent_reasoning
 
             if action == "deadlines":
                 result = await self.application_support_client.list_deadlines(
@@ -3211,11 +4020,11 @@ class ChatService:  # pylint: disable=too-many-public-methods
                     trace_id=trace_id,
                     session_id=chat_id,
                 )
-                return self._format_application_support_response(action, result)
+                return self._format_application_support_response(action, result), None
 
             payload = {
                 "user_id": user_id,
-                "program_requirements": user_message,
+                "program_requirements": effective_message,
                 "target_program": {"program_name": target_program} if target_program else {},
             }
             result = await self.application_support_client.create_checklist(
@@ -3224,7 +4033,7 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 trace_id=trace_id,
                 session_id=chat_id,
             )
-            return self._format_application_support_response(action, result)
+            return self._format_application_support_response(action, result), None
         except AgentClientError as exc:
             logger.warning(
                 "application_support_request_failed",
@@ -3234,7 +4043,7 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 status_code=exc.status_code,
                 error=str(exc),
             )
-            return self._application_support_unavailable_response()
+            return self._application_support_unavailable_response(), None
         except (RuntimeError, ValueError, TypeError) as exc:
             logger.warning(
                 "application_support_request_unavailable",
@@ -3243,7 +4052,7 @@ class ChatService:  # pylint: disable=too-many-public-methods
                 action=action,
                 error=str(exc),
             )
-            return self._application_support_unavailable_response()
+            return self._application_support_unavailable_response(), None
 
     def _build_intent_ready_response(
         self,
@@ -3294,8 +4103,8 @@ class ChatService:  # pylint: disable=too-many-public-methods
         if detected_intent == "eligibility_check":
             return (
                 "Great, I can help check your eligibility. "
-                "Share the program or scholarship criteria you want to evaluate, "
-                "and I will walk through them with your profile."
+                "Share the name or ID of the program or scholarship you want to evaluate, "
+                "and I will run the check against your profile."
             )
 
         if detected_intent in {"application_planning", "apply_to_named_school"}:
@@ -3305,6 +4114,15 @@ class ChatService:  # pylint: disable=too-many-public-methods
             )
 
         return self._generate_placeholder_response(user_message)
+
+    def _build_pending_application_support_context(self, user_message: str, detected_intent: str) -> dict[str, Any]:
+        """Persist the original application-support request across profile-gate turns."""
+        return {
+            "intent": detected_intent,
+            "action": self._detect_application_support_action(user_message),
+            "target_program": self._extract_target_program_from_message(user_message),
+            "source_message": user_message,
+        }
 
     def _generate_title_from_message(self, content: str) -> str:
         """Generate a chat title from the first message content."""

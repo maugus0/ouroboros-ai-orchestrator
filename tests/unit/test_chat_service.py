@@ -4,14 +4,17 @@
 # Tests call private helpers on the service under test (protected-access).
 # pylint: disable=redefined-outer-name,protected-access,too-many-lines
 
+import asyncio
 import base64
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.clients.agent_client import AgentClientError
 from app.services.chat_service import ChatService
+from app.services.eligibility_service import EligibilityService
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -95,6 +98,8 @@ def mock_program_discovery_client():
             },
         }
     )
+    client.search_programs = AsyncMock(return_value={"data": []})
+    client.search_institutions = AsyncMock(return_value={"data": []})
     return client
 
 
@@ -200,6 +205,7 @@ def chat_service(
     mock_scholarship_discovery_client,
     mock_application_support_client,
     mock_result_aggregation_service,
+    mock_eligibility_service,
 ):
     ChatService._RESPONSE_CACHE.clear()
     return ChatService(
@@ -213,7 +219,37 @@ def chat_service(
         scholarship_discovery_client=mock_scholarship_discovery_client,
         application_support_client=mock_application_support_client,
         result_aggregation_service=mock_result_aggregation_service,
+        eligibility_service=mock_eligibility_service,
     )
+
+
+@pytest.fixture
+def mock_eligibility_service():
+    service = MagicMock(spec=EligibilityService)
+    service.evaluate = AsyncMock(
+        return_value={
+            "match_result": {
+                "id": "match-001",
+                "user_id": "user-456",
+                "entity_type": "program",
+                "entity_id": "prog-uuid-1111",
+                "match_score": 78.5,
+                "score_breakdown": {"gpa": 20, "research_alignment": 30, "language": 15},
+                "confidence_level": "high",
+                "llm_model_used": "gpt-4o",
+                "llm_fallback_used": False,
+                "total_processing_time_ms": 340,
+            },
+            "attribution_report": {"narrative": "Strong research alignment and GPA match the program requirements."},
+            "agent_reasoning": {
+                "summary": "User is a strong match based on GPA and research background.",
+                "strengths": ["GPA above threshold", "Research alignment high"],
+                "gaps": [],
+                "confidence": "high",
+            },
+        }
+    )
+    return service
 
 
 @pytest.fixture
@@ -981,7 +1017,14 @@ async def test_send_message_mapped_intent_with_unavailable_agent_returns_unavail
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
     assert "service is temporarily unavailable" in assistant_kwargs["content"]
     assert "scholarship-discovery" in assistant_kwargs["content"]
-    assert assistant_kwargs["metadata"]["profile_gate"]["reason"] == "intent_agent_unavailable"
+    metadata = assistant_kwargs["metadata"]
+    assert metadata["profile_gate"]["reason"] == "intent_agent_unavailable"
+    assert metadata["gate_decision"]["status"] == "UNAVAILABLE"
+    assert metadata["gate_decision"]["reason"] == "The required agent is currently unavailable."
+    assert metadata["routing_decision"]["selected_agent"] == "scholarship-discovery"
+    assert metadata["routing_decision"]["confidence"] == 0.92
+    assert metadata["agent_reasoning"]["approach"] == "Pause domain routing until the mapped agent is available."
+    assert metadata["agent_reasoning"]["next_field"] is None
 
 
 @pytest.mark.asyncio
@@ -1065,6 +1108,107 @@ async def test_send_message_application_support_missing_sop_context_asks_for_tar
     mock_application_support_client.generate_sop.assert_not_awaited()
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
     assert "target university or program" in assistant_kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_gate_blocked_application_support_sets_pending_context(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Blocked application-planning turns should preserve the original SOP request for the follow-up slot answer."""
+    chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "application-support"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": [],
+            "missing_required_fields": ["enrollment_timeline"],
+            "missing_optional_fields": [],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+            "intent": "application_planning",
+        },
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": [],
+            "missing_required_fields": ["enrollment_timeline"],
+            "missing_optional_fields": [],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+            "intent": "application_planning",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {"applied_fields": []}
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "status": "needs_clarification",
+        "clarification_queue": [
+            {
+                "field": "enrollment_timeline",
+                "question": "Please share your enrollment timeline.",
+            }
+        ],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = []
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="make SOP for NUS Master of Computing",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["metadata"]["pending_intent"] == "application_planning"
+    assert assistant_kwargs["metadata"]["pending_application_support_context"] == {
+        "intent": "application_planning",
+        "action": "sop",
+        "target_program": "NUS Master of Computing",
+        "source_message": "make SOP for NUS Master of Computing",
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_application_support_response_uses_pending_context_for_slot_reply(
+    chat_service,
+    mock_application_support_client,
+):
+    """A slot-only follow-up should continue the original SOP request instead of defaulting to checklist."""
+    result, _ = await chat_service._build_application_support_response(
+        user_id="user-456",
+        chat_id="chat-123",
+        user_message="Summer 2027",
+        detected_intent="application_planning",
+        trace_id="wf-123",
+        pending_application_support_context={
+            "intent": "application_planning",
+            "action": "sop",
+            "target_program": "NUS Master of Computing",
+            "source_message": "make SOP for NUS Master of Computing",
+        },
+    )
+
+    assert result == "Generated SOP content"
+    mock_application_support_client.generate_sop.assert_awaited_once()
+    call_args = mock_application_support_client.generate_sop.await_args
+    assert call_args.args[0] == "user-456"
+    assert call_args.args[1]["target_program"]["program_name"] == "NUS Master of Computing"
+    assert call_args.args[1]["user_preferences"]["source_message"] == "make SOP for NUS Master of Computing"
+    assert call_args.args[1]["user_preferences"]["follow_up_message"] == "Summer 2027"
 
 
 @pytest.mark.asyncio
@@ -1382,6 +1526,93 @@ async def test_send_message_binary_reply_routes_to_react_clarification_submissio
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
     assert assistant_kwargs["content"] == "Great, I saved your publications. What is your target degree level?"
+
+
+@pytest.mark.asyncio
+async def test_send_message_binary_reply_submits_publications_when_not_missing_required(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    chat_service.intent_registry_service.detect_intent.return_value = "profile_completion"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "student-profile"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["gpa", "gpa_scale", "publications"],
+            "missing_required_fields": ["gpa", "gpa_scale"],
+            "missing_optional_fields": ["target_study_country"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["gpa", "gpa_scale"],
+            "missing_required_fields": ["gpa", "gpa_scale"],
+            "missing_optional_fields": ["target_study_country"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "status": "needs_clarification",
+        "clarification_queue": [
+            {
+                "field": "publications",
+                "question": "Do you have publications? Please provide title, venue, and year if available.",
+            }
+        ],
+    }
+    mock_profile_gate_service.submit_profile_clarification_answers.return_value = {
+        "profile_id": "profile-1",
+        "applied_fields": ["publications"],
+        "clarification_queue": [
+            {
+                "field": "gpa",
+                "question": "What is your highest GPA?",
+            }
+        ],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = [
+        {
+            "id": "assistant-prev-1",
+            "role": "assistant",
+            "content": "Do you have publications? Please provide title, venue, and year if available.",
+            "metadata": {
+                "source": "profile_upload_followup",
+                "profile_gate": {
+                    "allowed": False,
+                    "reason": "profile_incomplete_for_intent",
+                },
+            },
+        }
+    ]
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="No",
+    )
+
+    mock_profile_gate_service.collect_profile_updates_from_chat.assert_not_awaited()
+    mock_profile_gate_service.submit_profile_clarification_answers.assert_awaited_once()
+    submit_kwargs = mock_profile_gate_service.submit_profile_clarification_answers.call_args.kwargs
+    assert submit_kwargs["answers"] == [{"field": "publications", "value": "No"}]
 
 
 @pytest.mark.asyncio
@@ -1972,3 +2203,773 @@ async def test_send_message_metadata_includes_agent_reasoning_when_gate_denied(
     assert len(ar["decision_factors"]) > 0
     assert ar["next_field"] == "email"
     assert isinstance(ar["confidence"], float)
+
+
+# ── Eligibility Check Handler Tests ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_with_uuid_in_message(
+    chat_service,
+    mock_eligibility_service,
+):
+    """When message contains a UUID, use it directly and return score."""
+    entity_id = "a1b2c3d4-0000-0000-0000-000000000001"
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content=f"Am I eligible for program {entity_id}?",
+        workflow_run_id="wf-001",
+        gate={"allowed": True},
+    )
+
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_id == entity_id
+    assert call_args.args[0].entity_type == "program"
+    assert "78.5" in result["answer"]
+    assert result["agent_reasoning"] is not None
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_scholarship_keyword_sets_entity_type(
+    chat_service,
+    mock_eligibility_service,
+):
+    """Scholarship keyword in message sets entity_type to 'scholarship'."""
+    entity_id = "b2c3d4e5-0000-0000-0000-000000000002"
+    await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content=f"Do I qualify for this scholarship {entity_id}?",
+        workflow_run_id="wf-002",
+        gate={"allowed": True},
+    )
+
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_type == "scholarship"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_no_entity_returns_clarification(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """When no UUID and PDA returns multiple results, handler asks a follow-up."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [
+            {"id": "prog-1", "name": "MSc CS"},
+            {"id": "prog-2", "name": "MSc AI"},
+        ]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Am I eligible for a master program?",
+        workflow_run_id="wf-003",
+        gate={"allowed": True},
+    )
+
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert "program" in result["answer"].lower()
+    assert result["agent_reasoning"] is None
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_pda_resolves_single_entity(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """When PDA returns exactly one program, auto-select it and evaluate."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [{"id": "prog-only-1", "name": "MSc Computing"}]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Am I eligible for MSc Computing at NUS?",
+        workflow_run_id="wf-004",
+        gate={"allowed": True},
+    )
+
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_id == "prog-only-1"
+    assert "MSc Computing" in result["answer"]
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_consults_program_and_scholarship_agents(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """Eligibility orchestration should consult both PDA and SDA before final evaluation."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [{"id": "prog-only-1", "name": "MSc Computing"}]
+    }
+    mock_scholarship_discovery_client.search_scholarships.return_value = {
+        "data": [
+            {"id": "sch-1", "name": "Scholarship A"},
+            {"id": "sch-2", "name": "Scholarship B"},
+        ]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Am I eligible for MSc Computing at NUS?",
+        workflow_run_id="wf-consult-both",
+        gate={"allowed": True},
+    )
+
+    mock_program_discovery_client.search_programs.assert_awaited()
+    mock_scholarship_discovery_client.search_scholarships.assert_awaited()
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_pda_items_shape_resolves_entity(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """PDA may return list payload under 'items' with program_name key."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "items": [{"id": "prog-items-1", "program_name": "Master of Science in Computer Science"}]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Master of Science in Computer Science",
+        workflow_run_id="wf-items-001",
+        gate={"allowed": True},
+    )
+
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_id == "prog-items-1"
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_clarification_reply_picks_best_match(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """When is_clarification_reply=True, pick the first result even if PDA returns multiple."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [
+            {"id": "prog-best-1", "name": "NUS Master of Computing"},
+            {"id": "prog-other-2", "name": "NUS Master of CS"},
+        ]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="NUS Master of Computing",
+        workflow_run_id="wf-clarif",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+    )
+
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    call_args = mock_eligibility_service.evaluate.call_args
+    assert call_args.args[0].entity_id == "prog-best-1"
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_not_clarification_reply_multiple_returns_clarification(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """When is_clarification_reply=False and PDA returns multiple, still ask for clarification."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [
+            {"id": "prog-a", "name": "MSc Computing"},
+            {"id": "prog-b", "name": "MSc CS"},
+        ]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Am I eligible?",
+        workflow_run_id="wf-no-clarif",
+        gate={"allowed": True},
+        is_clarification_reply=False,
+    )
+
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_clarification_keeps_institution_hint_context(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """When unresolved, clarification response should carry institution hint for next turn."""
+    mock_program_discovery_client.search_programs.return_value = {"data": []}
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="I want to check my eligibility for MIT",
+        workflow_run_id="wf-mit-context",
+        gate={"allowed": True},
+    )
+
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+    ctx = result.get("pending_eligibility_context") or {}
+    assert ctx.get("institution_hint") == "MIT"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_uses_pending_institution_context_on_follow_up(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """Follow-up title-only reply should resolve via prior institution hint context."""
+    mock_program_discovery_client.search_programs.side_effect = [
+        {"data": []},
+        {"data": [{"id": "mit-mscs-1", "name": "Master of Science in Computer Science"}]},
+    ]
+    mock_program_discovery_client.search_institutions.return_value = {
+        "data": [{"id": "inst-mit-1", "name": "Massachusetts Institute of Technology"}]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Master of Science in Computer Science",
+        workflow_run_id="wf-mit-followup",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"institution_hint": "MIT", "entity_type": "program"},
+    )
+
+    mock_program_discovery_client.search_institutions.assert_awaited_once()
+    scoped_call_kwargs = mock_program_discovery_client.search_programs.await_args_list[1].kwargs
+    assert scoped_call_kwargs["institution_id"] == "inst-mit-1"
+
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    eval_call = mock_eligibility_service.evaluate.call_args
+    assert eval_call.args[0].entity_id == "mit-mscs-1"
+    assert result["source"] == "eligibility_engine"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_formats_wrapped_eligibility_response_payload(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+):
+    """Eligibility responses wrapped in {success,message,data} should still produce score/explainability output."""
+    mock_program_discovery_client.search_programs.return_value = {
+        "data": [{"id": "mit-mscs-1", "name": "Master of Science in Computer Science"}]
+    }
+    mock_eligibility_service.evaluate.return_value = {
+        "success": True,
+        "message": "Evaluation complete",
+        "data": {
+            "match_result": {
+                "match_score": "62.88",
+                "confidence_level": "medium",
+                "score_breakdown": {"gpa": 20.0},
+            },
+            "attribution_report": {"narrative": "Profile partially aligns with program expectations."},
+            "agent_reasoning": {"approach": "rule-and-llm"},
+        },
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="MIT Master of Science in Computer Science",
+        workflow_run_id="wf-wrapped-eligibility",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"entity_type": "program"},
+    )
+
+    assert result["source"] == "eligibility_engine"
+    assert "62.88/100" in result["answer"]
+    assert "profile partially aligns" in result["answer"].lower()
+    assert result["agent_reasoning"] == {"approach": "rule-and-llm"}
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_clarification_reply_does_not_fallback_to_scholarship(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """Program clarification follow-ups should stay in program flow even if scholarship results exist."""
+    mock_program_discovery_client.search_programs.return_value = {"data": []}
+    mock_scholarship_discovery_client.search_scholarships.return_value = {
+        "data": [{"id": "sch-should-not-use", "name": "Fallback Scholarship"}]
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Master of Science",
+        workflow_run_id="wf-no-scholarship-fallback",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"entity_type": "program", "institution_hint": "NUS"},
+    )
+
+    mock_scholarship_discovery_client.search_scholarships.assert_not_awaited()
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_clarification_reply_generic_program_reasks_details(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """Generic replies like 'Master of Science' should trigger re-clarification, not forced evaluation."""
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Master of Science",
+        workflow_run_id="wf-generic-program-title",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"entity_type": "program"},
+    )
+
+    mock_program_discovery_client.search_programs.assert_not_awaited()
+    mock_scholarship_discovery_client.search_scholarships.assert_not_awaited()
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+    assert "include the university" in result["answer"].lower()
+    assert "program id" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_generic_program_followup_asks_for_university_context(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """Second-turn generic replies should request university + full program title."""
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="Master of Science",
+        workflow_run_id="wf-generic-followup",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"entity_type": "program"},
+    )
+
+    mock_program_discovery_client.search_programs.assert_not_awaited()
+    mock_scholarship_discovery_client.search_scholarships.assert_not_awaited()
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+    assert "include the university" in result["answer"].lower()
+    assert "full program name" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_institution_prefixed_generic_program_followup_reasks_details(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """Replies like 'University of Sydney Master of Science' should still be treated as generic degree titles."""
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="University of Sydney Master of Science",
+        workflow_run_id="wf-generic-followup-institution-prefixed",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"entity_type": "program"},
+    )
+
+    mock_program_discovery_client.search_programs.assert_not_awaited()
+    mock_scholarship_discovery_client.search_scholarships.assert_not_awaited()
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+    assert "include the university" in result["answer"].lower()
+    assert "full program name" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_specific_program_unmatched_after_clarification_returns_exact_match_guidance(
+    chat_service,
+    mock_eligibility_service,
+    mock_program_discovery_client,
+    mock_scholarship_discovery_client,
+):
+    """Specific unresolved replies should not fall back to the initial broad clarification prompt."""
+    mock_program_discovery_client.search_programs.return_value = {"data": []}
+    mock_program_discovery_client.search_institutions.return_value = {"data": []}
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="NUS Master of Science in Computer Science",
+        workflow_run_id="wf-specific-unmatched-followup",
+        gate={"allowed": True},
+        is_clarification_reply=True,
+        pending_eligibility_context={"entity_type": "program"},
+    )
+
+    mock_scholarship_discovery_client.search_scholarships.assert_not_awaited()
+    mock_eligibility_service.evaluate.assert_not_awaited()
+    assert result["source"] == "orchestrator"
+    assert result.get("pending_intent") == "eligibility_check"
+    assert "couldn't find an exact program match" in result["answer"].lower()
+    assert "official program name" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_profile_dependency_error_returns_missing_fields_guidance(
+    chat_service,
+    mock_eligibility_service,
+    mock_profile_gate_service,
+):
+    entity_id = "d4e5f6a7-0000-0000-0000-000000000004"
+    mock_eligibility_service.evaluate.side_effect = HTTPException(
+        status_code=424,
+        detail="Student profile is required before eligibility can be evaluated.",
+    )
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "allowed": False,
+        "missing_required_fields": ["gpa", "gpa_scale"],
+        "missing_fields": ["gpa", "gpa_scale"],
+        "reason": "profile_incomplete_for_intent",
+    }
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content=f"Check my eligibility for program {entity_id}",
+        workflow_run_id="wf-elig-profile-err",
+        gate={"allowed": True},
+    )
+
+    assert result["source"] == "eligibility_engine"
+    assert "profile is incomplete" in result["answer"].lower()
+    assert "gpa" in result["answer"].lower()
+    assert "gpa scale" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_eligibility_check_entity_dependency_error_returns_entity_guidance(
+    chat_service,
+    mock_eligibility_service,
+):
+    entity_id = "e5f6a7b8-0000-0000-0000-000000000005"
+    mock_eligibility_service.evaluate.side_effect = HTTPException(
+        status_code=502,
+        detail="Unable to fetch program details for eligibility evaluation.",
+    )
+
+    result = await chat_service._handle_eligibility_check(
+        user_id="user-456",
+        chat_id="chat-123",
+        content=f"Check my eligibility for program {entity_id}",
+        workflow_run_id="wf-elig-entity-err",
+        gate={"allowed": True},
+    )
+
+    assert result["source"] == "eligibility_engine"
+    assert "couldn't fetch the latest details" in result["answer"].lower()
+    assert "exact name/id" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_send_message_eligibility_check_intent_calls_handler(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+    mock_eligibility_service,
+):
+    """eligibility_check intent routes to _handle_eligibility_check, not static message."""
+    mock_profile_gate_service.evaluate_gate.return_value = {
+        "user_id": "user-456",
+        "completed": True,
+        "missing_fields": [],
+        "updated_at": None,
+        "allowed": True,
+        "reason": "profile_complete_for_intent",
+    }
+    chat_service.intent_registry_service.detect_intent.return_value = "eligibility_check"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "eligibility-engine"}
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+
+    entity_id = "c3d4e5f6-0000-0000-0000-000000000003"
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content=f"Check my eligibility for program {entity_id}",
+    )
+
+    mock_eligibility_service.evaluate.assert_awaited_once()
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert "78.5" in assistant_kwargs["content"]
+    assert assistant_kwargs["metadata"]["intent"] == "eligibility_check"
+
+
+def test_detect_entity_type_for_eligibility_program_default():
+    assert ChatService._detect_entity_type_for_eligibility("Am I eligible for this program?") == "program"
+
+
+def test_detect_entity_type_for_eligibility_scholarship_keyword():
+    assert ChatService._detect_entity_type_for_eligibility("Do I qualify for this scholarship?") == "scholarship"
+
+
+def test_detect_entity_type_for_eligibility_grant_keyword():
+    assert ChatService._detect_entity_type_for_eligibility("Check eligibility for this grant") == "scholarship"
+
+
+def test_format_eligibility_response_high_score():
+    result = {
+        "match_result": {
+            "match_score": 85.0,
+            "confidence_level": "high",
+            "score_breakdown": {"gpa": 30, "research_alignment": 40, "language": 15},
+        },
+        "attribution_report": {"narrative": "Excellent profile alignment."},
+        "agent_reasoning": {},
+    }
+    answer = ChatService._format_eligibility_response(result=result, entity_type="program", entity_name="MSc AI")
+    assert "85.0" in answer
+    assert "strong match" in answer.lower()
+    assert "MSc AI" in answer
+    assert "Excellent profile alignment" in answer
+
+
+def test_format_eligibility_response_low_score():
+    result = {
+        "match_result": {
+            "match_score": 25.0,
+            "confidence_level": "low",
+            "score_breakdown": {},
+        },
+        "attribution_report": {},
+        "agent_reasoning": {},
+    }
+    answer = ChatService._format_eligibility_response(result=result, entity_type="program", entity_name=None)
+    assert "25.0" in answer
+    assert "below the typical threshold" in answer.lower()
+
+
+def test_format_eligibility_response_missing_score():
+    result = {"match_result": {}, "attribution_report": {}}
+    answer = ChatService._format_eligibility_response(result=result, entity_type="program", entity_name="Test Program")
+    assert "wasn't able to produce a score" in answer
+
+
+def test_eligibility_clarification_message_program():
+    msg = ChatService._eligibility_clarification_message("program")
+    assert "program" in msg.lower()
+    assert "name or ID" in msg
+
+
+def test_eligibility_clarification_message_scholarship():
+    msg = ChatService._eligibility_clarification_message("scholarship")
+    assert "scholarship" in msg.lower()
+
+
+def test_extract_program_institution_and_title_hint_simple_format():
+    """Extract institution/title from standard pattern like 'NUS Master of Science'."""
+    institution, title = ChatService._extract_program_institution_and_title_hint(
+        "NUS Master of Science in Computer Science"
+    )
+    assert institution == "NUS"
+    assert "Master" in title
+
+
+# --- _maybe_override_intent_for_clarification_reply: eligibility pending_intent ---
+
+
+def test_override_intent_eligibility_clarification_pending():
+    """When assistant metadata has pending_intent=eligibility_check, override non-eligibility intent."""
+    last_msg = {
+        "metadata": {
+            "pending_intent": "eligibility_check",
+            "profile_gate": {"allowed": True, "reason": "gate_passed"},
+        }
+    }
+    result = ChatService._maybe_override_intent_for_clarification_reply(
+        "program_discovery", "NUS Master of Computing", last_msg
+    )
+    assert result == "eligibility_check"
+
+
+def test_override_intent_eligibility_already_detected():
+    """When detected intent is already eligibility_check, return as-is regardless of pending_intent."""
+    last_msg = {
+        "metadata": {
+            "pending_intent": "eligibility_check",
+            "profile_gate": {"allowed": True, "reason": "gate_passed"},
+        }
+    }
+    result = ChatService._maybe_override_intent_for_clarification_reply(
+        "eligibility_check", "NUS Master of Computing", last_msg
+    )
+    assert result == "eligibility_check"
+
+
+def test_override_intent_no_pending_intent_falls_through():
+    """When metadata has no pending_intent, profile-gate logic runs as before."""
+    last_msg = {
+        "metadata": {
+            "profile_gate": {"allowed": True, "reason": "gate_passed"},
+        }
+    }
+    result = ChatService._maybe_override_intent_for_clarification_reply(
+        "program_discovery", "Master of Computing", last_msg
+    )
+    assert result == "program_discovery"
+
+
+def test_override_intent_domain_pending_from_profile_completion_reply():
+    """When pending_intent is a domain intent, profile-completion slot replies should continue it."""
+    last_msg = {
+        "metadata": {
+            "pending_intent": "scholarship_search",
+            "profile_gate": {"allowed": False, "reason": "profile_incomplete_for_intent"},
+        }
+    }
+    result = ChatService._maybe_override_intent_for_clarification_reply("profile_completion", "Singapore", last_msg)
+    assert result == "scholarship_search"
+
+
+def test_override_intent_no_metadata_returns_detected():
+    """When latest assistant message has no metadata, detected intent is unchanged."""
+    result = ChatService._maybe_override_intent_for_clarification_reply(
+        "program_discovery", "NUS Master of Computing", {"role": "assistant", "content": "Please specify."}
+    )
+    assert result == "program_discovery"
+
+
+@pytest.mark.asyncio
+async def test_send_message_gate_blocked_scholarship_sets_pending_intent_metadata(
+    chat_service,
+    mock_chat_repo,
+    mock_message_repo,
+    sample_chat,
+    sample_message,
+    mock_profile_gate_service,
+):
+    """Blocked scholarship turns should persist pending_intent for the next slot-answer turn."""
+    chat_service.intent_registry_service.detect_intent.return_value = "scholarship_search"
+    chat_service.intent_registry_service.get_policy.return_value = {"agent": "scholarship-discovery"}
+
+    mock_profile_gate_service.evaluate_gate.side_effect = [
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["target_study_country"],
+            "missing_required_fields": ["target_study_country"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+        {
+            "user_id": "user-456",
+            "profile_id": "profile-1",
+            "completed": False,
+            "missing_fields": ["target_study_country"],
+            "missing_required_fields": ["target_study_country"],
+            "updated_at": None,
+            "allowed": False,
+            "reason": "profile_incomplete_for_intent",
+        },
+    ]
+    mock_profile_gate_service.collect_profile_updates_from_chat.return_value = {"applied_fields": ["funding_source"]}
+    mock_profile_gate_service.get_profile_clarifications.return_value = {
+        "profile_id": "profile-1",
+        "status": "needs_clarification",
+        "clarification_queue": [
+            {
+                "field": "target_study_country",
+                "question": "Please share your preferred study country.",
+            }
+        ],
+    }
+
+    mock_chat_repo.get_by_id_with_user.return_value = sample_chat
+    mock_chat_repo.get_by_id.return_value = {**sample_chat, "message_count": 2}
+    mock_message_repo.create.return_value = sample_message
+    mock_message_repo.list_by_chat.return_value = []
+
+    await chat_service.send_message(
+        user_id="user-456",
+        chat_id="chat-123",
+        content="what about scholarship for me",
+    )
+
+    _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
+    assert assistant_kwargs["metadata"]["pending_intent"] == "scholarship_search"
+
+
+def test_handle_eligibility_check_no_entity_includes_pending_intent(
+    anyio_backend,
+):
+    """Clarification response dict must carry pending_intent=eligibility_check."""
+    _ = anyio_backend
+
+    async def _run():
+        service = MagicMock()
+        service._detect_entity_type_for_eligibility = MagicMock(return_value="program")
+        service._resolve_entity_for_eligibility = AsyncMock(return_value=(None, None))
+        service._eligibility_clarification_message = MagicMock(return_value="Please provide a program name.")
+
+        result = await ChatService._handle_eligibility_check(
+            service,
+            user_id="u1",
+            chat_id="c1",
+            content="am I eligible",
+            workflow_run_id="wf-1",
+            gate={"allowed": True},
+        )
+        return result
+
+    result = asyncio.get_event_loop().run_until_complete(_run())
+    assert result.get("pending_intent") == "eligibility_check"
+    assert result["source"] == "orchestrator"

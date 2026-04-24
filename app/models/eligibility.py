@@ -18,13 +18,19 @@ class EligibilityEvaluateRequest(BaseModel):
         description="Program or scholarship identifier known to the caller.",
         examples=["program-123"],
     )
-    user_profile: dict[str, Any] = Field(
-        ...,
-        description="Structured student profile used for scoring.",
+    user_profile: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Structured student profile used for scoring. "
+            "When omitted, the orchestrator hydrates it from student-profile."
+        ),
     )
-    entity_data: dict[str, Any] = Field(
-        ...,
-        description="Program or scholarship requirements/details for matching.",
+    entity_data: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Program or scholarship requirements/details for matching. "
+            "When omitted, the orchestrator hydrates it from the downstream discovery service."
+        ),
     )
     include_attribution: bool = Field(
         default=True,

@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 
 from app.config import settings
 from app.core.logging import get_logger
+from app.security.internal_token_issuer import InternalTokenIssuer
 
 logger = get_logger(__name__)
 
@@ -19,6 +20,9 @@ class EligibilityRequestOptions:
     json_body: Optional[dict[str, Any]] = None
     params: Optional[dict[str, Any]] = None
     trace_id: Optional[str] = None
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    authorization: Optional[str] = None
 
 
 class EligibilityClient:
@@ -29,15 +33,50 @@ class EligibilityClient:
         base_url: Optional[str] = None,
         service_token: Optional[str] = None,
         timeout: Optional[int] = None,
+        internal_token_issuer: Optional[InternalTokenIssuer] = None,
     ) -> None:
         self.base_url = (base_url or settings.ELIGIBILITY_SERVICE_URL).rstrip("/")
         self.service_token = service_token or settings.X_SERVICE_TOKEN
         self.timeout = timeout or settings.AGENT_CALL_TIMEOUT
+        self._internal_token_issuer = internal_token_issuer or InternalTokenIssuer()
+        self._internal_service_name = "eligibility-engine"
 
-    def _build_headers(self, trace_id: Optional[str] = None) -> dict[str, str]:
-        headers = {"X-Service-Token": self.service_token}
-        if trace_id:
-            headers["X-Trace-ID"] = trace_id
+    def _resolve_authorization(
+        self,
+        *,
+        authorization: Optional[str],
+        user_id: Optional[str],
+        session_id: Optional[str],
+        trace_id: Optional[str],
+    ) -> Optional[str]:
+        if authorization:
+            return authorization
+        if not settings.INTERNAL_TOKEN_ENABLED:
+            return None
+
+        audience = self._internal_token_issuer.resolve_audience(self._internal_service_name)
+        return self._internal_token_issuer.build_bearer_token(
+            sub=user_id or "orchestrator-service",
+            aud=audience,
+            sid=session_id,
+            trace_id=trace_id,
+        )
+
+    def _build_headers(self, options: EligibilityRequestOptions) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        authorization = self._resolve_authorization(
+            authorization=options.authorization,
+            user_id=options.user_id,
+            session_id=options.session_id,
+            trace_id=options.trace_id,
+        )
+        if authorization:
+            headers["Authorization"] = authorization
+        if self.service_token:
+            # Backward-compatible for environments that still validate X-Service-Token.
+            headers["X-Service-Token"] = self.service_token
+        if options.trace_id:
+            headers["X-Trace-ID"] = options.trace_id
         return headers
 
     async def _request(
@@ -55,7 +94,7 @@ class EligibilityClient:
                     url=url,
                     json=options.json_body,
                     params=options.params,
-                    headers=self._build_headers(options.trace_id),
+                    headers=self._build_headers(options),
                 )
             response.raise_for_status()
             return response.json()
@@ -89,7 +128,11 @@ class EligibilityClient:
         return await self._request(
             "POST",
             "/matching/evaluate",
-            EligibilityRequestOptions(json_body=payload, trace_id=trace_id),
+            EligibilityRequestOptions(
+                json_body=payload,
+                trace_id=trace_id,
+                user_id=str(payload.get("user_id") or "").strip() or None,
+            ),
         )
 
     async def get_results(
@@ -105,7 +148,7 @@ class EligibilityClient:
         return await self._request(
             "GET",
             f"/matching/results/{user_id}",
-            EligibilityRequestOptions(params=params, trace_id=trace_id),
+            EligibilityRequestOptions(params=params, trace_id=trace_id, user_id=user_id),
         )
 
     async def get_result_detail(self, match_id: str, trace_id: Optional[str] = None) -> dict[str, Any]:
@@ -113,7 +156,7 @@ class EligibilityClient:
         return await self._request(
             "GET",
             f"/matching/results/detail/{match_id}",
-            EligibilityRequestOptions(trace_id=trace_id),
+            EligibilityRequestOptions(trace_id=trace_id, user_id="orchestrator-service"),
         )
 
     async def get_attribution_report(self, match_id: str, trace_id: Optional[str] = None) -> dict[str, Any]:
@@ -121,5 +164,5 @@ class EligibilityClient:
         return await self._request(
             "GET",
             f"/attribution/report/{match_id}",
-            EligibilityRequestOptions(trace_id=trace_id),
+            EligibilityRequestOptions(trace_id=trace_id, user_id="orchestrator-service"),
         )

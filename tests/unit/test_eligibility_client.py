@@ -6,7 +6,21 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.clients.eligibility_client import EligibilityClient
+from app.clients.eligibility_client import EligibilityClient, EligibilityRequestOptions
+from app.config import settings
+
+
+class _StubIssuer:
+    def __init__(self):
+        self.calls = []
+
+    def resolve_audience(self, service_name: str) -> str:
+        self.calls.append(("resolve_audience", service_name))
+        return "ouroboros.eligibility-engine"
+
+    def build_bearer_token(self, *, sub: str, aud: str, sid=None, trace_id=None, extra_claims=None):
+        self.calls.append(("build_bearer_token", sub, aud, sid, trace_id, extra_claims))
+        return "Bearer internal-token"
 
 
 class _FakeResponse:
@@ -44,7 +58,7 @@ class _FakeAsyncClient:
 
 @pytest.mark.asyncio
 async def test_client_forwards_headers_payload_and_params(monkeypatch):
-    """Client should forward service token, trace ID, payload and params to downstream."""
+    """Client should forward internal auth, legacy token, trace ID, payload and params to downstream."""
     captured: dict[str, Any] = {}
 
     async def request_handler(**request_kwargs):
@@ -56,8 +70,15 @@ async def test_client_forwards_headers_payload_and_params(monkeypatch):
         "AsyncClient",
         lambda timeout: _FakeAsyncClient(request_handler),  # noqa: ARG005
     )
+    monkeypatch.setattr(settings, "INTERNAL_TOKEN_ENABLED", True)
 
-    client = EligibilityClient(base_url="http://eligibility", service_token="token-123", timeout=5)
+    stub_issuer = _StubIssuer()
+    client = EligibilityClient(
+        base_url="http://eligibility",
+        service_token="token-123",
+        timeout=5,
+        internal_token_issuer=stub_issuer,
+    )
     result = await client.get_results(
         user_id="user-1",
         query_params={"entity_type": "program", "page": 2, "page_size": 5},
@@ -67,7 +88,20 @@ async def test_client_forwards_headers_payload_and_params(monkeypatch):
     assert result["success"] is True
     assert captured["url"] == "http://eligibility/matching/results/user-1"
     assert captured["params"] == {"page": 2, "page_size": 5, "entity_type": "program"}
-    assert captured["headers"] == {"X-Service-Token": "token-123", "X-Trace-ID": "trace-abc"}
+    assert captured["headers"] == {
+        "Authorization": "Bearer internal-token",
+        "X-Service-Token": "token-123",
+        "X-Trace-ID": "trace-abc",
+    }
+    assert ("resolve_audience", "eligibility-engine") in stub_issuer.calls
+    assert (
+        "build_bearer_token",
+        "user-1",
+        "ouroboros.eligibility-engine",
+        None,
+        "trace-abc",
+        None,
+    ) in stub_issuer.calls
 
 
 @pytest.mark.asyncio
@@ -90,6 +124,44 @@ async def test_client_maps_timeout_to_504(monkeypatch):
 
     assert exc_info.value.status_code == 504
     assert exc_info.value.detail == "Eligibility service timed out"
+
+
+@pytest.mark.asyncio
+async def test_client_explicit_authorization_takes_precedence(monkeypatch):
+    """Explicit authorization should bypass internal token generation."""
+    captured: dict[str, Any] = {}
+
+    async def request_handler(**request_kwargs):
+        captured.update(request_kwargs)
+        return _FakeResponse(json_body={"success": True, "message": "OK", "data": {}})
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda timeout: _FakeAsyncClient(request_handler),  # noqa: ARG005
+    )
+    monkeypatch.setattr(settings, "INTERNAL_TOKEN_ENABLED", True)
+
+    stub_issuer = _StubIssuer()
+    client = EligibilityClient(
+        base_url="http://eligibility",
+        service_token="token-123",
+        timeout=5,
+        internal_token_issuer=stub_issuer,
+    )
+
+    await client._request(  # pylint: disable=protected-access
+        "GET",
+        "/matching/results/user-1",
+        options=EligibilityRequestOptions(
+            trace_id="trace-abc",
+            user_id="user-1",
+            authorization="Bearer upstream-token",
+        ),
+    )
+
+    assert captured["headers"]["Authorization"] == "Bearer upstream-token"
+    assert not stub_issuer.calls
 
 
 @pytest.mark.asyncio

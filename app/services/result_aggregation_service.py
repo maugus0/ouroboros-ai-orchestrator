@@ -428,6 +428,126 @@ class ResultAggregationService:
             "dashboard": dashboard,
         }
 
+    async def persist_chat_dashboard_snapshot(
+        self,
+        *,
+        user_id: str,
+        chat_id: Optional[str],
+        source_intent: str,
+        source_message: Optional[str] = None,
+        programs: Optional[list[dict[str, Any]]] = None,
+        scholarships: Optional[list[dict[str, Any]]] = None,
+        agents: Optional[dict[str, dict[str, Any]]] = None,
+        errors: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Persist a dashboard snapshot directly from chat-generated discovery results."""
+        workflow_repo = self.workflow_run_repo
+        aggregate_repo = self.aggregated_result_repo
+        if workflow_repo is None or aggregate_repo is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable")
+
+        workflow_id = str(uuid.uuid4())
+        normalized_errors = [dict(item) for item in (errors or []) if isinstance(item, dict)]
+        status_value = "partial" if normalized_errors else "success"
+
+        await workflow_repo.create_run(
+            run_id=workflow_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            workflow_type="chat_dashboard_sync",
+            workflow_state="RECEIVED",
+            context={
+                "source_intent": source_intent,
+                "source_message": source_message,
+                "program_count": len(programs or []),
+                "scholarship_count": len(scholarships or []),
+            },
+        )
+
+        latest = await aggregate_repo.get_latest_for_user(user_id=user_id)
+        latest_dashboard = latest.get("dashboard_view") if isinstance(latest, dict) else {}
+        latest_profile_output = latest.get("profile_output") if isinstance(latest, dict) else None
+        latest_application_output = latest.get("application_output") if isinstance(latest, dict) else None
+        latest_program_output = latest.get("program_output") if isinstance(latest, dict) else None
+        latest_scholarship_output = latest.get("scholarship_output") if isinstance(latest, dict) else None
+
+        program_items = self._clone_items(programs) if programs is not None else self._extract_dashboard_section_items(
+            latest_dashboard, "programs"
+        )
+        scholarship_items = (
+            self._clone_items(scholarships)
+            if scholarships is not None
+            else self._extract_dashboard_section_items(latest_dashboard, "scholarships")
+        )
+        match_items = self._build_match_items_from_sections(program_items=program_items, scholarship_items=scholarship_items)
+
+        merged_agents = self._extract_dashboard_agents(latest_dashboard)
+        merged_agents.update({key: dict(value) for key, value in (agents or {}).items() if isinstance(value, dict)})
+
+        version = await aggregate_repo.get_next_version(workflow_run_id=workflow_id)
+        dashboard = {
+            "workflow_id": workflow_id,
+            "status": status_value,
+            "version": version,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "profile": self._extract_dashboard_profile(latest_dashboard, latest_profile_output),
+            "programs": {
+                "items": program_items,
+                "total": len(program_items),
+            },
+            "scholarships": {
+                "items": scholarship_items,
+                "total": len(scholarship_items),
+            },
+            "matches": {
+                "items": match_items,
+                "total": len(match_items),
+            },
+            "application": self._extract_dashboard_application(latest_dashboard, latest_application_output),
+            "agents": merged_agents,
+            "errors": normalized_errors,
+        }
+
+        await aggregate_repo.create_version(
+            row_id=str(uuid.uuid4()),
+            workflow_run_id=workflow_id,
+            user_id=user_id,
+            result_version=version,
+            status=status_value,
+            current_step="COMPLETED",
+            profile_output=latest_profile_output,
+            program_output={"items": program_items} if programs is not None else latest_program_output,
+            scholarship_output={"items": scholarship_items}
+            if scholarships is not None
+            else latest_scholarship_output,
+            match_output={"results": match_items},
+            application_output=latest_application_output,
+            dashboard_view=dashboard,
+            error_message=normalized_errors[0]["message"] if status_value == "partial" and normalized_errors else None,
+        )
+
+        await workflow_repo.complete_run(
+            run_id=workflow_id,
+            status="success",
+            workflow_state="PARTIAL_SUCCESS" if normalized_errors else "SUCCESS",
+            error_message=normalized_errors[0]["message"] if normalized_errors else None,
+            context={
+                "status": status_value,
+                "source_intent": source_intent,
+                "program_count": len(program_items),
+                "scholarship_count": len(scholarship_items),
+            },
+        )
+
+        self._invalidate_dashboard_cache(user_id)
+        self._invalidate_result_cache(user_id, workflow_id)
+        return {
+            "workflow_id": workflow_id,
+            "status": status_value,
+            "version": version,
+            "dashboard": dashboard,
+        }
+
     async def get_workflow_result(
         self,
         *,
@@ -1263,6 +1383,45 @@ class ResultAggregationService:
             return payload.get("data")
         return payload
 
+    @staticmethod
+    def _clone_items(items: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        if not isinstance(items, list):
+            return []
+        return [dict(item) for item in items if isinstance(item, dict)]
+
+    @staticmethod
+    def _extract_dashboard_section_items(dashboard: Any, section_name: str) -> list[dict[str, Any]]:
+        if not isinstance(dashboard, dict):
+            return []
+        section = dashboard.get(section_name)
+        if isinstance(section, dict) and isinstance(section.get("items"), list):
+            return [dict(item) for item in section["items"] if isinstance(item, dict)]
+        return []
+
+    def _extract_dashboard_profile(self, dashboard: Any, profile_output: Any) -> dict[str, Any]:
+        if isinstance(dashboard, dict) and isinstance(dashboard.get("profile"), dict):
+            return dict(dashboard["profile"])
+        profile_data = self._extract_profile_data(profile_output if isinstance(profile_output, dict) else {})
+        return {
+            "status": {},
+            "details": profile_data,
+        }
+
+    @staticmethod
+    def _extract_dashboard_application(dashboard: Any, application_output: Any) -> Any:
+        if isinstance(dashboard, dict) and "application" in dashboard:
+            return dashboard.get("application")
+        return application_output
+
+    @staticmethod
+    def _extract_dashboard_agents(dashboard: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(dashboard, dict):
+            return {}
+        agents = dashboard.get("agents")
+        if not isinstance(agents, dict):
+            return {}
+        return {key: dict(value) for key, value in agents.items() if isinstance(value, dict)}
+
     def _extract_program_items(self, payload: Any) -> list[dict[str, Any]]:
         data = self._extract_data(payload)
         if isinstance(data, list):
@@ -1309,6 +1468,33 @@ class ResultAggregationService:
             if nested_entity_type and nested_entity_id:
                 return str(nested_entity_type), str(nested_entity_id)
         return None, None
+
+    def _build_match_items_from_sections(
+        self,
+        *,
+        program_items: list[dict[str, Any]],
+        scholarship_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        match_items: list[dict[str, Any]] = []
+        for entity_type, items in (("program", program_items), ("scholarship", scholarship_items)):
+            for item in items:
+                entity_id = item.get("id")
+                if entity_id is None:
+                    continue
+                match_summary = item.get("match")
+                if not isinstance(match_summary, dict):
+                    continue
+                normalized = self._normalize_match_summary(match_summary)
+                normalized["entity_type"] = entity_type
+                normalized["entity_id"] = str(entity_id)
+                match_items.append(
+                    {
+                        "entity_type": entity_type,
+                        "entity_id": str(entity_id),
+                        "match_result": normalized,
+                    }
+                )
+        return match_items
 
     def _normalize_match_summary(self, match_item: dict[str, Any]) -> dict[str, Any]:
         target = match_item

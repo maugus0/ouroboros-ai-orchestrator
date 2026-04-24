@@ -91,10 +91,20 @@ def mock_program_discovery_client():
     client.ask_question = AsyncMock(
         return_value={
             "answer": "Here are some programs that match your criteria including MSc Artificial Intelligence.",
-            "programs": [],
             "agent_reasoning": {
                 "approach": "Searched for programs matching user criteria",
                 "confidence": 0.9,
+                "ranking_breakdown": [
+                    {
+                        "program_id": "program-1",
+                        "program_name": "MSc Artificial Intelligence",
+                        "university": "Imperial College London",
+                        "country": "United Kingdom",
+                        "composite_score": 0.88,
+                        "rank": 1,
+                        "decision": "recommend",
+                    }
+                ],
             },
         }
     )
@@ -124,6 +134,47 @@ def mock_application_support_client():
 
 
 @pytest.fixture
+def mock_application_tracking_service():
+    service = MagicMock()
+    service.start_application = AsyncMock(
+        return_value={
+            "id": "app-123",
+            "entity_type": "program",
+            "entity_id": "program-1",
+            "title": "NUS Master of Computing",
+            "provider": "National University of Singapore",
+            "status": "in_progress",
+            "checklist_output": {
+                "data": {
+                    "items": [
+                        {"description": "Prepare SOP"},
+                        {"description": "Request recommendation letters"},
+                    ]
+                }
+            },
+        }
+    )
+    service.generate_sop = AsyncMock(return_value={"output": {"data": {"content": "Generated SOP content"}}})
+    service.generate_cover_letter = AsyncMock(
+        return_value={"output": {"data": {"content": "Generated cover letter"}}}
+    )
+    service.create_checklist = AsyncMock(
+        return_value={
+            "output": {
+                "data": {
+                    "items": [
+                        {"description": "Prepare SOP"},
+                        {"description": "Request recommendation letters"},
+                    ]
+                }
+            }
+        }
+    )
+    service.sync_deadline = AsyncMock(return_value={"output": {"data": []}})
+    return service
+
+
+@pytest.fixture
 def mock_scholarship_discovery_client():
     client = MagicMock()
     client.search_scholarships = AsyncMock(
@@ -136,12 +187,24 @@ def mock_scholarship_discovery_client():
                     "provider": "UCL",
                     "funding_amount": 15000,
                     "currency": "GBP",
+                    "match_confidence": 0.85,
                 }
             ],
             "total": 1,
             "agent_reasoning": {
                 "approach": "Filtered scholarships based on student profile",
                 "confidence": 0.85,
+                "matching_breakdown": [
+                    {
+                        "scholarship_id": "scholarship-1",
+                        "scholarship_name": "Global Masters Scholarship",
+                        "provider": "UCL",
+                        "amount": "GBP 15,000",
+                        "composite_score": 0.85,
+                        "rank": 1,
+                        "decision": "recommend",
+                    }
+                ],
             },
         }
     )
@@ -190,6 +253,50 @@ def mock_result_aggregation_service():
             },
         }
     )
+    service.persist_chat_dashboard_snapshot = AsyncMock(
+        return_value={
+            "workflow_id": "chat-sync-1",
+            "status": "success",
+            "version": 1,
+            "dashboard": {
+                "programs": {"items": [], "total": 0},
+                "scholarships": {"items": [], "total": 0},
+            },
+        }
+    )
+    service.get_dashboard = AsyncMock(
+        return_value={
+            "has_results": True,
+            "latest_workflow_id": "agg-wf-1",
+            "dashboard": {
+                "programs": {
+                    "items": [
+                        {
+                            "id": "program-1",
+                            "program_name": "NUS Master of Computing",
+                            "institution_name": "National University of Singapore",
+                            "deadline": "2026-12-15",
+                            "match": {"match_score": 88.2},
+                        }
+                    ],
+                    "total": 1,
+                },
+                "scholarships": {
+                    "items": [
+                        {
+                            "id": "scholarship-1",
+                            "name": "Global Masters Scholarship",
+                            "provider": "UCL",
+                            "deadline": "2026-10-01",
+                            "match": {"match_score": 82.6},
+                        }
+                    ],
+                    "total": 1,
+                },
+            },
+            "history": [],
+        }
+    )
     return service
 
 
@@ -204,6 +311,7 @@ def chat_service(
     mock_program_discovery_client,
     mock_scholarship_discovery_client,
     mock_application_support_client,
+    mock_application_tracking_service,
     mock_result_aggregation_service,
     mock_eligibility_service,
 ):
@@ -218,6 +326,7 @@ def chat_service(
         program_discovery_client=mock_program_discovery_client,
         scholarship_discovery_client=mock_scholarship_discovery_client,
         application_support_client=mock_application_support_client,
+        application_tracking_service=mock_application_tracking_service,
         result_aggregation_service=mock_result_aggregation_service,
         eligibility_service=mock_eligibility_service,
     )
@@ -341,8 +450,9 @@ async def test_send_message_success(
     sample_message,
     mock_profile_gate_service,
     mock_program_discovery_client,
+    mock_result_aggregation_service,
 ):
-    """Test sending a discovery message uses PDA for rich response and saves to dashboard async."""
+    """Test sending a discovery message uses PDA for rich response and persists dashboard state."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -366,12 +476,10 @@ async def test_send_message_success(
     assert "chat" in result
     assert mock_message_repo.create.call_count == 2
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    # Hybrid approach: Response comes from PDA (rich response with agent_reasoning)
     assert "MSc Artificial Intelligence" in assistant_kwargs["content"]
-    # PDA handler is called for the rich response
     mock_program_discovery_client.ask_question.assert_awaited_once()
-    # Dashboard save happens async (may or may not complete before assertion)
-    # The key is that PDA is the primary handler for chat response
+    mock_result_aggregation_service.persist_chat_dashboard_snapshot.assert_awaited_once()
+    assert assistant_kwargs["metadata"]["refresh_tabs"] == ["programs", "scholarships"]
 
 
 @pytest.mark.asyncio
@@ -760,8 +868,9 @@ async def test_send_message_program_discovery_mentions_singapore_when_present(
     sample_message,
     mock_profile_gate_service,
     mock_program_discovery_client,
+    mock_result_aggregation_service,
 ):
-    """Program discovery uses PDA handler for rich response, saves to dashboard async."""
+    """Program discovery uses PDA handler for rich response and persists dashboard items."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -783,10 +892,81 @@ async def test_send_message_program_discovery_mentions_singapore_when_present(
     )
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    # Hybrid approach: Response comes from PDA handler (rich response with agent_reasoning)
     assert "MSc Artificial Intelligence" in assistant_kwargs["content"]
-    # PDA handler is called for the rich response
     mock_program_discovery_client.ask_question.assert_awaited_once()
+    mock_result_aggregation_service.persist_chat_dashboard_snapshot.assert_awaited_once()
+
+
+def test_build_program_dashboard_items_prefers_programs_mentioned_order(chat_service):
+    payload = {
+        "programs_mentioned": [
+            "Master of Science in Computer Science at Massachusetts Institute of Technology (MIT)",
+            "Master of Science in Data Science at Stanford University",
+        ],
+        "agent_reasoning": {
+            "ranking_breakdown": [
+                {
+                    "program_id": "program-robotics",
+                    "program_name": "Master in Robotics, Systems and Control",
+                    "university": "ETH Zurich (Swiss Federal Institute of Technology)",
+                    "country": "Switzerland",
+                    "composite_score": 0.79,
+                    "rank": 1,
+                    "decision": "recommend",
+                },
+                {
+                    "program_id": "program-mit-cs",
+                    "program_name": "Master of Science in Computer Science",
+                    "university": "Massachusetts Institute of Technology (MIT)",
+                    "country": "United States of America",
+                    "composite_score": 0.76,
+                    "rank": 4,
+                    "decision": "recommend",
+                },
+                {
+                    "program_id": "program-stanford-ds",
+                    "program_name": "Master of Science in Data Science",
+                    "university": "Stanford University",
+                    "country": "United States of America",
+                    "composite_score": 0.74,
+                    "rank": 6,
+                    "decision": "recommend",
+                },
+            ]
+        },
+    }
+
+    items = chat_service._build_program_dashboard_items_from_chat_result(payload)
+
+    assert [item["id"] for item in items] == ["program-mit-cs", "program-stanford-ds"]
+    assert [item["program_name"] for item in items] == [
+        "Master of Science in Computer Science",
+        "Master of Science in Data Science",
+    ]
+
+
+def test_build_program_dashboard_items_falls_back_to_ranking_when_mentions_do_not_match(chat_service):
+    payload = {
+        "programs_mentioned": ["Unrelated Program at Example University"],
+        "agent_reasoning": {
+            "ranking_breakdown": [
+                {
+                    "program_id": "program-1",
+                    "program_name": "MSc Artificial Intelligence",
+                    "university": "Imperial College London",
+                    "country": "United Kingdom",
+                    "composite_score": 0.88,
+                    "rank": 1,
+                    "decision": "recommend",
+                }
+            ]
+        },
+    }
+
+    items = chat_service._build_program_dashboard_items_from_chat_result(payload)
+
+    assert len(items) == 1
+    assert items[0]["id"] == "program-1"
 
 
 @pytest.mark.asyncio
@@ -798,8 +978,9 @@ async def test_send_message_scholarship_search_uses_sda_handler(
     sample_message,
     mock_profile_gate_service,
     mock_scholarship_discovery_client,
+    mock_result_aggregation_service,
 ):
-    """Scholarship search uses SDA handler for rich response, saves to dashboard async."""
+    """Scholarship search uses SDA handler for rich response and persists dashboard items."""
     mock_profile_gate_service.evaluate_gate.return_value = {
         "user_id": "user-456",
         "completed": True,
@@ -821,10 +1002,10 @@ async def test_send_message_scholarship_search_uses_sda_handler(
     )
 
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    # Hybrid approach: Response comes from SDA handler (rich response with agent_reasoning)
     assert "Global Masters Scholarship" in assistant_kwargs["content"]
-    # SDA handler is called for the rich response
     mock_scholarship_discovery_client.search_scholarships.assert_awaited_once()
+    mock_result_aggregation_service.persist_chat_dashboard_snapshot.assert_awaited_once()
+    assert assistant_kwargs["metadata"]["refresh_tabs"] == ["programs", "scholarships"]
 
 
 @pytest.mark.asyncio
@@ -1028,16 +1209,16 @@ async def test_send_message_mapped_intent_with_unavailable_agent_returns_unavail
 
 
 @pytest.mark.asyncio
-async def test_send_message_application_support_intent_calls_client(
+async def test_send_message_application_support_intent_tracks_application_and_generates_sop(
     chat_service,
     mock_chat_repo,
     mock_message_repo,
     sample_chat,
     sample_message,
     mock_profile_gate_service,
-    mock_application_support_client,
+    mock_application_tracking_service,
 ):
-    """Application-planning turns should delegate to application-support once the gate passes."""
+    """Application-planning turns should create/update a tracked application before generating SOP."""
     chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
     chat_service.intent_registry_service.get_policy.return_value = {"agent": "application-support"}
     mock_profile_gate_service.evaluate_gate.return_value = {
@@ -1062,12 +1243,15 @@ async def test_send_message_application_support_intent_calls_client(
         content="Write an SOP for NUS Master of Computing",
     )
 
-    mock_application_support_client.generate_sop.assert_awaited_once()
-    call_args = mock_application_support_client.generate_sop.await_args
-    assert call_args.args[0] == "user-456"
-    assert call_args.args[1]["target_program"]["program_name"] == "NUS Master of Computing"
+    mock_application_tracking_service.start_application.assert_awaited_once()
+    mock_application_tracking_service.generate_sop.assert_awaited_once()
+    call_args = mock_application_tracking_service.start_application.await_args
+    assert call_args.kwargs["user_id"] == "user-456"
+    assert call_args.kwargs["body"].title == "NUS Master of Computing"
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
     assert assistant_kwargs["content"] == "Generated SOP content"
+    assert assistant_kwargs["metadata"]["refresh_tabs"] == ["applications"]
+    assert assistant_kwargs["metadata"]["focus_application_id"] == "app-123"
 
 
 @pytest.mark.asyncio
@@ -1078,7 +1262,7 @@ async def test_send_message_application_support_missing_sop_context_asks_for_tar
     sample_chat,
     sample_message,
     mock_profile_gate_service,
-    mock_application_support_client,
+    mock_application_tracking_service,
 ):
     """SOP requests without target context should not call downstream with invalid payloads."""
     chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
@@ -1105,9 +1289,9 @@ async def test_send_message_application_support_missing_sop_context_asks_for_tar
         content="Write my SOP",
     )
 
-    mock_application_support_client.generate_sop.assert_not_awaited()
+    mock_application_tracking_service.generate_sop.assert_not_awaited()
     _, assistant_kwargs = mock_message_repo.create.call_args_list[-1]
-    assert "target university or program" in assistant_kwargs["content"]
+    assert "target program or scholarship" in assistant_kwargs["content"]
 
 
 @pytest.mark.asyncio
@@ -1178,6 +1362,7 @@ async def test_send_message_gate_blocked_application_support_sets_pending_contex
         "intent": "application_planning",
         "action": "sop",
         "target_program": "NUS Master of Computing",
+        "target_entity_type": "program",
         "source_message": "make SOP for NUS Master of Computing",
     }
 
@@ -1185,10 +1370,10 @@ async def test_send_message_gate_blocked_application_support_sets_pending_contex
 @pytest.mark.asyncio
 async def test_build_application_support_response_uses_pending_context_for_slot_reply(
     chat_service,
-    mock_application_support_client,
+    mock_application_tracking_service,
 ):
     """A slot-only follow-up should continue the original SOP request instead of defaulting to checklist."""
-    result, _ = await chat_service._build_application_support_response(
+    result = await chat_service._build_application_support_response(
         user_id="user-456",
         chat_id="chat-123",
         user_message="Summer 2027",
@@ -1198,17 +1383,15 @@ async def test_build_application_support_response_uses_pending_context_for_slot_
             "intent": "application_planning",
             "action": "sop",
             "target_program": "NUS Master of Computing",
+            "target_entity_type": "program",
             "source_message": "make SOP for NUS Master of Computing",
         },
     )
 
-    assert result == "Generated SOP content"
-    mock_application_support_client.generate_sop.assert_awaited_once()
-    call_args = mock_application_support_client.generate_sop.await_args
-    assert call_args.args[0] == "user-456"
-    assert call_args.args[1]["target_program"]["program_name"] == "NUS Master of Computing"
-    assert call_args.args[1]["user_preferences"]["source_message"] == "make SOP for NUS Master of Computing"
-    assert call_args.args[1]["user_preferences"]["follow_up_message"] == "Summer 2027"
+    assert result["answer"] == "Generated SOP content"
+    assert result["focus_application_id"] == "app-123"
+    mock_application_tracking_service.start_application.assert_awaited_once()
+    mock_application_tracking_service.generate_sop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1219,7 +1402,7 @@ async def test_send_message_application_support_failure_returns_graceful_respons
     sample_chat,
     sample_message,
     mock_profile_gate_service,
-    mock_application_support_client,
+    mock_application_tracking_service,
 ):
     """Downstream application-support failures should not crash the chat turn."""
     chat_service.intent_registry_service.detect_intent.return_value = "application_planning"
@@ -1236,8 +1419,8 @@ async def test_send_message_application_support_failure_returns_graceful_respons
         "missing_required_fields": [],
         "missing_optional_fields": [],
     }
-    mock_application_support_client.create_checklist.side_effect = AgentClientError(
-        service_name="application-support",
+    mock_application_tracking_service.start_application.side_effect = AgentClientError(
+        service_name="application-tracking",
         message="application-support request failed",
         status_code=503,
     )
